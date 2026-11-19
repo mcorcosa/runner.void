@@ -5,7 +5,7 @@
   const ROAD_HALF = LANE_WIDTH * LANE_COUNT / 2;
   const TILE = 6;
   const TRACK_VIEW = 186;
-  const CUT_DEPTH = 1.4;
+  const CUT_DEPTH = 2.15;
   const NEAR = 1.3;
   const PITCH = 0.207;
   const SIN = Math.sin(PITCH);
@@ -183,9 +183,10 @@
     sky(time) {
       const { ctx, width, height, centerX, horizon } = this;
       const backdrop = ctx.createLinearGradient(0, 0, 0, height);
-      backdrop.addColorStop(0, '#0c091a');
-      backdrop.addColorStop(0.41, '#160d27');
-      backdrop.addColorStop(1, '#07060e');
+      backdrop.addColorStop(0, '#0c0a1b');
+      backdrop.addColorStop(0.32, '#100e24');
+      backdrop.addColorStop(0.56, '#050b17');
+      backdrop.addColorStop(1, '#02050d');
       ctx.fillStyle = backdrop;
       ctx.fillRect(0, 0, width, height);
 
@@ -224,6 +225,12 @@
         ctx.stroke();
       }
 
+      const depthHaze = ctx.createLinearGradient(0, horizon - height * 0.10, 0, horizon + height * 0.12);
+      depthHaze.addColorStop(0, '#030b1800');
+      depthHaze.addColorStop(1, '#030a17d6');
+      ctx.fillStyle = depthHaze;
+      ctx.fillRect(0, 0, width, height);
+
       for (let i = 0; i < 30; i++) {
         const side = i % 2 ? 1 : -1;
         const x = centerX + side * width * (0.11 + repeatable(i + 37) * 0.45);
@@ -232,31 +239,61 @@
         ctx.save();
         ctx.translate(x, y + Math.sin(time * 0.45 + i) * size * 0.25);
         ctx.rotate(0.2 + repeatable(i + 89) * 1.6);
-        ctx.fillStyle = '#322248';
+        ctx.fillStyle = '#28334d';
         ctx.fillRect(-size / 2, -size / 2, size, size);
-        ctx.fillStyle = '#a278db52';
+        ctx.fillStyle = '#8b9cdf62';
         ctx.fillRect(-size / 2, -size / 2, size, 1);
         ctx.restore();
       }
     }
 
     deepVoid(distance) {
-      // Scattered geometry below the deck gives the sky visible through cuts a world-space parallax.
-      const stride = 19;
-      const first = Math.floor((distance + 12) / stride);
-      const last = Math.ceil((distance + TRACK_VIEW + 30) / stride);
+      const { ctx, width, height } = this;
+      const stride = 23;
+      const first = Math.floor((distance + 14) / stride);
+      const last = Math.ceil((distance + TRACK_VIEW + 46) / stride);
       for (let band = last; band >= first; band--) {
-        for (let lane = 0; lane < LANE_COUNT; lane++) {
-          const index = band * 89 + lane * 7;
-          const x = laneX(lane) + (repeatable(index) - 0.5) * LANE_WIDTH;
-          const y = -6 - repeatable(index + 1) * 15;
+        for (let detail = 0; detail < 13; detail++) {
+          const index = band * 107 + detail * 7;
+          const x = (repeatable(index) - 0.5) * 22;
+          const y = -5.4 - repeatable(index + 1) ** 1.45 * 29;
           const z = band * stride + repeatable(index + 2) * stride - distance;
-          const size = 0.09 + repeatable(index + 3) ** 4 * 0.72;
-          this.ctx.globalAlpha = Math.max(0, Math.min(0.8, (225 - z) / 135));
-          this.box(x, y, z, size, size * 0.58, size * 1.8, ['#736792', '#372947', '#514163']);
+          const brightness = repeatable(index + 3);
+          const fade = Math.max(0, Math.min(1, (232 - z) / 130, (z - 4) / 16));
+          if (fade <= 0) continue;
+          if (detail < 2) {
+            ctx.globalAlpha = fade * (0.57 + brightness * 0.35);
+            this.voidShard(x, y, z, 0.34 + brightness * 0.73, repeatable(index + 4) - 0.5);
+            continue;
+          }
+          const point = this.viewPoint([x, y, z]);
+          if (point[2] < NEAR) continue;
+          const [px, py] = this.screenPoint(point);
+          if (px < 0 || px > width || py < 0 || py > height) continue;
+          const radius = Math.min(2.4, 0.6 + brightness * 0.47 + this.focal / point[2] * 0.052);
+          ctx.globalAlpha = fade * (0.35 + brightness * 0.60);
+          ctx.fillStyle = brightness > 0.84 ? '#b6efff' : brightness > 0.45 ? '#86b6e3' : '#687fca';
+          ctx.beginPath();
+          ctx.arc(px, py, radius, 0, Math.PI * 2);
+          ctx.fill();
+          if (brightness > 0.94) {
+            ctx.globalAlpha *= 0.48;
+            ctx.fillRect(px - radius * 2.2, py - 0.45, radius * 4.4, 0.9);
+          }
         }
       }
-      this.ctx.globalAlpha = 1;
+      ctx.globalAlpha = 1;
+    }
+
+    voidShard(x, y, z, size, tilt) {
+      const crown = [x - tilt * size * 1.6, y + size, z + size * 0.28];
+      const tip = [x + tilt * size * 2, y - size * 1.75, z + size * 0.8];
+      const left = [x - size * 0.75, y - size * 0.26, z];
+      const right = [x + size * 0.83, y + size * 0.15, z + size * 0.36];
+      const ridge = [x + size * 0.05, y - size * 0.08, z - size * 0.41];
+      this.face([crown, left, tip, ridge], '#4e729a');
+      this.face([crown, ridge, tip, right], '#23405f');
+      this.face([crown, left, ridge], '#a6d4eb');
     }
 
     track(run, ready) {
@@ -277,7 +314,11 @@
           const entry = Math.max(near, gap.z - run.distance);
           const resume = Math.min(far, gap.end - run.distance);
           this.deckSection(resume, far, tile, selected, -1, support);
-          if (gap.end <= z + TILE && resume <= TRACK_VIEW) this.cutLip(laneX(gap.lane), resume);
+          if (gap.end <= z + TILE && resume <= TRACK_VIEW) {
+            this.ctx.globalAlpha = Math.max(0.48, dust);
+            this.cutLip(laneX(gap.lane), resume);
+            this.ctx.globalAlpha = dust;
+          }
           this.deckSection(entry, resume, tile, selected, gap.lane, support);
           this.deckSection(near, entry, tile, selected, -1, support);
         } else {
@@ -293,7 +334,7 @@
           this.flat(x - 1.17, x + 1.17, entry - 0.8, entry, '#dfb557', 0.034);
         }
         if (resume >= -this.cameraBack && resume + 1.52 <= TRACK_VIEW) {
-          this.ctx.globalAlpha = Math.min(1, (210 - resume) / 130);
+          this.ctx.globalAlpha = Math.max(0.48, Math.min(1, (210 - resume) / 130));
           this.flat(x - 1.19, x + 1.19, resume, resume + 0.58, '#59a3ab', 0.034);
           for (const offset of [-0.78, 0, 0.78]) {
             this.flat(x + offset - 0.20, x + offset + 0.20, resume + 0.62, resume + 1.52, '#99edf0', 0.034);
@@ -319,9 +360,9 @@
         this.flat(left, right, near, far, tile % 2 ? '#231a36' : '#271c3a');
         this.flat(left, right, near, Math.min(far, near + 0.065), '#151022', 0.018);
       }
-      if (missing > 0) this.flat(cut - half - 0.11, cut - half, near, far, '#715d92', 0.025);
+      if (missing > 0) this.flat(cut - half - 0.16, cut - half, near, far, '#929ec1', 0.025);
       if (missing >= 0 && missing < LANE_COUNT - 1) {
-        this.flat(cut + half, cut + half + 0.11, near, far, '#715d92', 0.025);
+        this.flat(cut + half, cut + half + 0.16, near, far, '#929ec1', 0.025);
       }
       if (selected >= 0 && selected !== missing && far - near > 0.13) {
         const x = laneX(selected);
@@ -348,16 +389,27 @@
     }
 
     cutWall(x, near, far) {
-      this.face([[x, 0, near], [x, 0, far], [x, -CUT_DEPTH, far], [x, -CUT_DEPTH, near]], '#322745');
-      this.face([[x, 0, near], [x, 0, far], [x, -0.24, far], [x, -0.24, near]], '#806b9f');
-      this.face([[x, -0.87, near], [x, -0.87, far], [x, -1.03, far], [x, -1.03, near]], '#504368');
+      this.face([[x, 0, near], [x, 0, far], [x, -CUT_DEPTH, far], [x, -CUT_DEPTH, near]], '#202b43');
+      this.face([[x, 0, near], [x, 0, far], [x, -0.27, far], [x, -0.27, near]], '#6b7396');
+      this.face([[x, -1.07, near], [x, -1.07, far], [x, -1.21, far], [x, -1.21, near]], '#455370');
+      if (far - near < 1.7) return;
+      const brace = near + Math.min(1.7, (far - near) * 0.44);
+      this.face([[x, -0.27, brace - 0.32], [x, -0.27, brace + 0.42],
+        [x, -CUT_DEPTH, brace + 0.19], [x, -CUT_DEPTH, brace - 0.19]], '#49546f');
+      this.face([[x, -0.29, brace - 0.32], [x, -0.29, brace - 0.23],
+        [x, -CUT_DEPTH, brace - 0.13], [x, -CUT_DEPTH, brace - 0.19]], '#8793b2');
     }
 
     cutLip(x, z) {
       const left = x - LANE_WIDTH / 2;
       const right = x + LANE_WIDTH / 2;
-      this.face([[left, 0, z], [right, 0, z], [right, -CUT_DEPTH, z], [left, -CUT_DEPTH, z]], '#302a44');
-      this.face([[left, 0, z], [right, 0, z], [right, -0.21, z], [left, -0.21, z]], '#70adb9');
+      this.face([[left, 0, z], [right, 0, z], [right, -CUT_DEPTH, z], [left, -CUT_DEPTH, z]], '#253951');
+      this.face([[left, 0, z], [right, 0, z], [right, -0.24, z], [left, -0.24, z]], '#a6eeff');
+      for (const offset of [-0.75, 0, 0.75]) {
+        const lamp = x + offset;
+        this.face([[lamp - 0.16, -0.40, z], [lamp + 0.17, -0.40, z],
+          [lamp + 0.11, -1.29, z], [lamp - 0.11, -1.29, z]], '#6dbdcf');
+      }
     }
 
     hurdle(x, z) {

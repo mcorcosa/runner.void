@@ -499,7 +499,9 @@ test('page wiring reports a collision, restarts with one button, and dashes with
 
 test('center and exterior closures expose deep walls and an empty deck before and after the far lip enters view', () => {
   const { Scene } = browserHarness('gap-edge');
-  const renderer = Object.assign(Object.create(Scene.prototype), { cameraBack: 10.8, ctx: {} });
+  let stars = 0;
+  const ctx = { beginPath() {}, arc() { stars++; }, fill() {}, fillRect() {} };
+  const renderer = Object.assign(Object.create(Scene.prototype), { cameraBack: 10.8, ctx });
   const flats = [];
   const boxes = [];
   const faces = [];
@@ -524,7 +526,7 @@ test('center and exterior closures expose deep walls and an empty deck before an
       const touchesVoid = (x1, x2, start, end) => x1 < right && x2 > left && start < resume && end > entry;
       assert.ok(flats.every((flat) => !touchesVoid(flat.left, flat.right, flat.start, flat.end)));
       assert.ok(boxes.every(([x, , z, width, , depth]) => !touchesVoid(x - width / 2, x + width / 2, z - depth / 2, z + depth / 2)));
-      const walls = faces.filter(({ points }) => points.some(([, y]) => y <= -1.4));
+      const walls = faces.filter(({ points }) => points.some(([, y]) => y <= -2.15));
       assert.ok(walls.some(({ points }) => points.every(([x]) => x === right)));
       assert.equal(walls.some(({ points }) => points.every(([x]) => x === left)), gap.lane !== 0);
       if (resume > 186) {
@@ -541,10 +543,14 @@ test('center and exterior closures expose deep walls and an empty deck before an
     assert.equal(z - depth / 2, gap.z);
   }
 
-  boxes.length = flats.length = 0;
+  boxes.length = flats.length = faces.length = 0;
+  Object.assign(renderer, { width: 1440, height: 900, cameraY: 5.35, cameraX: 0,
+    centerX: 720, centerY: 504, focal: 1008 });
   renderer.deepVoid(180);
-  assert.ok(boxes.length > 0 && boxes.every(([, y, , width]) => y < -5 && width < 1));
+  assert.ok(stars > 20);
+  assert.ok(faces.length > 0 && faces.every(({ points }) => points.every(([, y]) => y < -4)));
   assert.equal(flats.length, 0, 'The visible depth is scattered below the deck');
+  assert.equal(boxes.length, 0);
 });
 
 test('long-spike guidance distinguishes warning, jump, air dash, and touchdown', () => {
@@ -849,4 +855,94 @@ test('compact camera keeps the near deck and all lane centers in portrait and sh
       assert.ok(y > (safe.top ?? 0) + 45 && y < height - (safe.bottom ?? 0));
     }
   }
+});
+
+test('actual acceleration, dash, and landing boost move the FOV smoothly and within bounds', () => {
+  const { Scene } = browserHarness('camera');
+  const view = Object.assign(Object.create(Scene.prototype), { reduceMotion: false, openingBlend: 0,
+    width: 1440, height: 900, insets: [0, 0, 0, 0], particles: [] });
+  const run = new Run({ scenario: 'landing' });
+  view.reset(run.speed);
+  const focal = () => {
+    view.frameCamera(run);
+    return view.focal;
+  };
+  const advance = (seconds) => {
+    for (let tick = 0; tick < Math.round(seconds / STEP); tick++) {
+      run.tick();
+      assert.equal(run.crash, null);
+      view.updateSpeed(run, STEP, 'running');
+    }
+    return focal();
+  };
+  const baseline = focal();
+  const midway = advance(9);
+  const atCap = advance(9.5);
+  assert.ok(midway / baseline > 0.90 && midway / baseline < 0.92);
+  assert.equal(run.speed, 64);
+  assert.ok(Math.abs(atCap / baseline - 0.82) < 0.001);
+
+  run.dash();
+  const firstDashFrame = advance(STEP);
+  const dash = advance(0.2);
+  assert.ok(atCap - firstDashFrame < baseline * 0.01);
+  assert.ok(dash < atCap - baseline * 0.035);
+  assert.ok(Math.abs(advance(1.6) - atCap) < baseline * 0.004);
+
+  run.jumpOrTap();
+  while (!run.tapOpen) advance(STEP);
+  run.jumpOrTap();
+  while (!run.boosting) advance(STEP);
+  assert.ok(advance(0.24) < atCap - baseline * 0.03);
+  run.dash();
+  const both = advance(0.22);
+  assert.ok(both / baseline > 0.70 && both / baseline < 0.75);
+  assert.ok(Math.abs(advance(1.6) - atCap) < baseline * 0.005);
+  view.updateSpeed({ speed: 900, baseSpeed: 64 }, 10, 'running');
+  assert.ok(Math.abs(focal() / baseline - 0.70) < 0.0001);
+});
+
+test('speed framing preserves readable outer lanes, and reduced motion and restart reset the lens', () => {
+  const game = browserHarness('camera');
+  game.ids.start.events.click();
+  game.step(2);
+  const { scene, runner } = game;
+  scene.openingBlend = 0;
+  runner.x = 5;
+  for (const [width, height, safe, compact] of [
+    [320, 568, { top: 42, bottom: 24 }, true], [667, 280, { left: 44, right: 18, bottom: 21 }, true],
+    [1280, 900, {}, false], [1440, 900, {}, false],
+  ]) {
+    game.resize(width, height, safe);
+    scene.reset(32);
+    scene.frameCamera(runner);
+    const resting = scene.focal;
+    for (const speed of [32, 64, 101]) {
+      scene.updateSpeed({ baseSpeed: 64, speed }, 10, 'running');
+      scene.frameCamera(runner);
+      const xs = [-6.45, -5, -2.5, 0, 2.5, 5, 6.45].map((x) => scene.screenPoint(scene.viewPoint([x, 0, -1]))[0]);
+      assert.ok(xs[0] >= (safe.left ?? 0) && xs.at(-1) <= width - (safe.right ?? 0));
+      assert.ok(xs[2] - xs[1] >= 40, 'Outer lanes remain readable at the widest setting');
+    }
+    assert.ok(Math.abs(scene.focal / resting - (compact ? 0.76 : 0.70)) < 0.0001);
+  }
+
+  runner.distance = 1179;
+  runner.x = 0;
+  runner.baseSpeed = 64;
+  game.step(5);
+  assert.equal(game.dom.body.dataset.mode, 'ended');
+  game.ids.restart.events.click();
+  game.step(1);
+  assert.equal(game.runner.speed, START_SPEED);
+  assert.equal(scene.widening, 0);
+
+  const reduced = browserHarness('camera', { reducedMotion: true, pace: 'fast' });
+  reduced.ids.start.events.click();
+  reduced.step(1);
+  const resting = reduced.scene.focal;
+  reduced.key('keydown', 'KeyW');
+  reduced.step(18);
+  assert.ok(reduced.runner.speed > MAX_SPEED);
+  assert.equal(reduced.scene.focal, resting);
 });

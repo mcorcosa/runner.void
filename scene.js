@@ -561,17 +561,18 @@
     player(run, time, ready, dashing) {
       const x = run.x;
       const lift = run.height;
-      const stride = this.reduceMotion || run.airborne || ready ? 0 : Math.sin(run.time * 14);
-      const bob = this.reduceMotion || run.airborne ? 0 : ready ? Math.sin(time * 1.9) * 0.035 : Math.abs(stride) * 0.055;
+      const sliding = run.sliding;
+      const stride = this.reduceMotion || run.airborne || ready || sliding ? 0 : Math.sin(run.time * 14);
+      const bob = this.reduceMotion || run.airborne || sliding ? 0 : ready ? Math.sin(time * 1.9) * 0.035 : Math.abs(stride) * 0.055;
       const y = lift + bob;
-      const landingCue = run.tapOpen || (run.boosting && !dashing);
+      const landingCue = run.slideWindowOpen || (run.boosting && !dashing);
       const ring = landingCue ? '#9bffe6' : dashing ? '#90d9ff' : '#c0a0ff';
       const signal = landingCue ? '#65ffd7' : dashing ? '#a6e1ff' : '#ab82fa';
       const overCut = run.obstacles.some((obstacle) => obstacle.type === 'gap' &&
         obstacle.z < run.distance + 0.59 && obstacle.end > run.distance - 0.75 &&
         Math.abs(laneX(obstacle.lane) - x) < LANE_WIDTH / 2 + 0.87);
       if (!overCut) {
-        this.flat(x - .67, x + .67, -.49, .59, '#0e0a18a8', .032);
+        this.flat(x - .67, x + .67, -.49, sliding ? .91 : .59, '#0e0a18a8', .032);
         this.ctx.globalAlpha = landingCue || dashing ? 1 : 0.57;
         this.line([[x - .65, .035, -.75], [x - .87, .035, -.35], [x - .87, .035, .38]], ring, 2);
         this.line([[x + .65, .035, -.75], [x + .87, .035, -.35], [x + .87, .035, .38]], ring, 2);
@@ -582,11 +583,17 @@
         const trail = dashing ? '#56b6ffad' : '#6fffd37d';
         const core = dashing ? '#cfedff' : '#b9ffea';
         const length = dashing ? 6.1 : 4.1;
+        const anchor = sliding ? y - .51 : y;
         for (const side of [-1, 1]) {
           const end = [x + side * 1.15, y + .36, -length];
-          this.face([[x + side * .57, y + 1.24, 0], [x + side * .73, y + .92, 0], end], trail);
-          this.line([[x + side * .66, y + 1.09, 0], [x + side * .92, y + .71, -length * .65]], core, dashing ? 3.2 : 2.2);
+          this.face([[x + side * .57, anchor + 1.24, 0], [x + side * .73, anchor + .92, 0], end], trail);
+          this.line([[x + side * .66, anchor + 1.09, 0], [x + side * .92, anchor + .71, -length * .65]], core, dashing ? 3.2 : 2.2);
         }
+      }
+
+      if (sliding) {
+        this.slidePlayer(x, signal);
+        return;
       }
 
       for (const side of [-1, 1]) {
@@ -609,6 +616,25 @@
       this.box(x, y + 1.42, .015, .68, .65, .67, steel);
       this.box(x, y + 1.58, -.328, .56, .19, .035, ['#8966c3', '#221735', '#8463b3']);
       this.box(x, y + 1.65, -.349, .46, .042, .01, [signal, signal, signal]);
+    }
+
+    slidePlayer(x, signal) {
+      for (const side of [-1, 1]) {
+        const legX = x + side * .27;
+        const reach = side > 0 ? .22 : 0;
+        this.box(legX, .03, .56 + reach, .43, .23, .69, violet);
+        this.box(legX, .19, .26 + reach, .40, .21, .68, suit);
+      }
+      this.box(x, .25, -.20, .95, .49, .69, violet);
+      for (const side of [-1, 1]) {
+        this.box(x + side * .59, .36, -.11, .30, .27, .51, suit);
+        this.box(x + side * .66, .33, .21, .33, .21, .28, steel);
+      }
+      this.box(x, .37, -.62, .53, .34, .21, suit);
+      this.box(x, .56, -.74, .30, .08, .026, [signal, signal, signal]);
+      this.box(x, .71, -.31, .68, .57, .65, steel);
+      this.box(x, .88, -.65, .56, .17, .035, ['#8966c3', '#221735', '#8463b3']);
+      this.box(x, .94, -.67, .46, .042, .01, [signal, signal, signal]);
     }
 
     drawParticles(dt, distance) {

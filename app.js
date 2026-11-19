@@ -40,7 +40,7 @@
   const appDisplayMode = matchMedia('(display-mode: standalone), (display-mode: fullscreen)');
   const appleMobile = /iPhone|iPad|iPod/.test(navigator.userAgent) ||
     (/Mac/.test(navigator.platform) && navigator.maxTouchPoints > 1);
-  const gameKeys = ['ArrowLeft', 'KeyA', 'ArrowRight', 'KeyD', 'Space', 'KeyX', 'KeyW', 'Enter'];
+  const gameKeys = ['ArrowLeft', 'KeyA', 'ArrowRight', 'KeyD', 'ArrowDown', 'KeyS', 'Space', 'KeyX', 'KeyW', 'Enter'];
   let touchLayout = matchMedia('(pointer: coarse)').matches;
   let touchCues = touchLayout;
   let swipe = null;
@@ -213,7 +213,8 @@
       run.move(Math.sign(x));
     } else if (vertical >= SWIPE_DISTANCE && vertical >= horizontal * SWIPE_DOMINANCE) {
       swipe = null;
-      if (y < 0) run.jumpOrTap();
+      if (y < 0) run.jump();
+      else run.slide();
     }
   }
 
@@ -302,7 +303,7 @@
     switch (type) {
       case 'boost':
         scene.pulseSpeed();
-        message = { text: 'Landing boost', tone: 'mint', until: run.time + 0.85 };
+        message = { text: 'Power slide', tone: 'mint', until: run.boostUntil };
         break;
       case 'break':
         message = { text: 'Barrier broken', tone: 'violet', until: run.time + 0.92 };
@@ -352,8 +353,8 @@
       const hazardDistance = hazard ? hazard.z - run.distance : Infinity;
       const needsAirDash = run.airborne && !run.airDashed && hazard?.type === 'spikes' && hazard.tiles === 2;
       const dashNow = needsAirDash && run.height >= SPIKE_HEIGHT + 0.18 && hazardDistance <= run.speed * 0.13;
-      if (run.tapOpen) {
-        cue = touchCues ? 'Swipe up now · Landing boost' : 'Tap Space now';
+      if (run.slideWindowOpen) {
+        cue = touchCues ? 'Power slide now · Swipe down' : 'Power slide now · ↓ / S';
         tone = 'mint';
       } else if (dashNow && dashReady) {
         cue = touchCues ? 'Air dash now · Tap Dash' : 'Air dash now · W / X';
@@ -365,8 +366,8 @@
         if (touchCues) cue = dashReady ? 'Air dash next · Tap Dash' : 'Air dash recharging';
         else cue = dashReady ? 'Air dash next · W / X' : 'Air dash recharging · W / X';
         tone = 'hazard';
-      } else if (run.airborne && !run.queuedTap) {
-        cue = touchCues ? 'Swipe up again at landing' : 'Tap Space at landing';
+      } else if (run.airborne && !run.queuedSlide) {
+        cue = touchCues ? 'Swipe down at touchdown' : 'Slide at touchdown · ↓ / S';
         tone = 'violet';
       } else if (!run.airborne && hazard?.type === 'gap') {
         cue = touchCues ? 'Lane closing · Swipe sideways' : 'Lane closing · Move over';
@@ -381,6 +382,9 @@
           cue = hazard.tiles === 2 ? 'Long spikes ahead' : 'Short spikes ahead';
         }
         tone = 'hazard';
+      } else if (run.braking) {
+        cue = 'Sliding';
+        tone = 'violet';
       }
     }
     write(feedback, cue);
@@ -419,7 +423,8 @@
     if (mode !== 'running') return;
     if (key === 'ArrowLeft' || key === 'KeyA') run.move(-1);
     if (key === 'ArrowRight' || key === 'KeyD') run.move(1);
-    if (key === 'Space') run.jumpOrTap();
+    if (key === 'Space') run.jump();
+    if (key === 'ArrowDown' || key === 'KeyS') run.slide();
     if (key === 'KeyX' || key === 'KeyW') run.dash();
   }
 

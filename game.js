@@ -10,8 +10,11 @@
   const STEP = 1 / 120;
   const GRAVITY = 23;
   const JUMP_SPEED = 9.8;
-  const TAP_EARLY = 0.13;
-  const TAP_LATE = 0.09;
+  const SLIDE_EARLY = 0.13;
+  const SLIDE_LATE = 0.09;
+  const SLIDE_TIME = 0.34;
+  const SLIDE_BRAKE_FRACTION = 0.08;
+  const MAX_SLIDE_BRAKE = 12;
   const BOOST_TIME = 0.85;
   const BOOST_SPEED = 15;
   const DASH_TIME = 0.7;
@@ -144,8 +147,10 @@
       this.height = 0;
       this.verticalSpeed = 0;
       this.airborne = false;
-      this.queuedTap = false;
-      this.landingTapUntil = -1;
+      this.queuedSlide = false;
+      this.landingSlideUntil = -1;
+      this.slideUntil = 0;
+      this.slideSlows = false;
       this.boostUntil = 0;
       this.dashUntil = 0;
       this.dashReadyAt = 0;
@@ -185,7 +190,7 @@
     }
 
     addSpikes(z, lane, tiles, lanes) {
-      // Two tiles exceed the normal jump's maximum travel, including a landing boost and ground-dash carry.
+      // Two tiles exceed the normal jump's travel, including a power slide boost and ground-dash carry.
       const upperSpeed = this.upperBaseAt(z) + BOOST_SPEED;
       const tileLength = Math.ceil((forwardEnvelope(upperSpeed, SPIKE_CLEAR_TIME) + GROUND_DASH_AIR_TRAVEL) / 2);
       const end = z + tileLength * tiles;
@@ -294,11 +299,14 @@
         (this.verticalSpeed + Math.sqrt(this.verticalSpeed ** 2 + 2 * GRAVITY * this.height)) / GRAVITY;
     }
 
-    get tapOpen() {
-      if (this.airborne) return !this.queuedTap && this.verticalSpeed < 0 && this.touchdownIn() <= TAP_EARLY;
-      return this.time <= this.landingTapUntil;
+    get slideWindowOpen() {
+      if (this.crash) return false;
+      if (this.airborne) return !this.queuedSlide && this.verticalSpeed < 0 && this.touchdownIn() <= SLIDE_EARLY;
+      return this.time <= this.landingSlideUntil;
     }
 
+    get sliding() { return this.time < this.slideUntil; }
+    get braking() { return this.sliding && this.slideSlows; }
     get boosting() { return this.time < this.boostUntil; }
     get dashing() { return this.time < this.dashUntil; }
     get dashCharge() { return Math.max(0, Math.min(1, 1 - (this.dashReadyAt - this.time) / DASH_COOLDOWN)); }
@@ -309,23 +317,31 @@
       return Math.max(speed * 0.10, speed * (SPIKE_DESCENT_TIME - 0.035) - patch.tileLength - PLAYER_HALF_DEPTH * 2);
     }
 
-    jumpOrTap() {
-      if (this.crash) return;
-      if (this.airborne) {
-        if (this.tapOpen) this.queuedTap = true;
-        return;
-      }
-      if (this.tapOpen) {
-        this.boost();
-        return;
-      }
+    jump() {
+      if (this.crash || this.airborne) return;
+      this.slideUntil = this.time;
+      this.landingSlideUntil = -1;
       this.airborne = true;
       this.airDashed = false;
       this.verticalSpeed = JUMP_SPEED;
     }
 
-    boost() {
-      this.landingTapUntil = -1;
+    slide() {
+      if (this.crash || this.sliding) return;
+      if (this.airborne) {
+        if (this.slideWindowOpen) this.queuedSlide = true;
+      } else if (this.slideWindowOpen) {
+        this.powerSlide();
+      } else {
+        this.slideUntil = this.time + SLIDE_TIME;
+        this.slideSlows = true;
+      }
+    }
+
+    powerSlide() {
+      this.landingSlideUntil = -1;
+      this.slideUntil = this.time + SLIDE_TIME;
+      this.slideSlows = false;
       this.boostUntil = this.time + BOOST_TIME;
       this.onEvent('boost');
     }
@@ -337,7 +353,8 @@
       this.airDashUntil = this.airborne ? this.time + AIR_DASH_GLIDE : 0;
       if (this.airborne) {
         this.airDashed = true;
-        this.queuedTap = false;
+        // Extending the flight changes the touchdown this request was timed for.
+        this.queuedSlide = false;
       }
       this.dashSpent = false;
       this.onEvent('dash');
@@ -351,7 +368,8 @@
       const boost = this.boosting ? BOOST_SPEED : 0;
       const dash = this.dashing ? DASH_SPEED * Math.sqrt((this.dashUntil - this.time) / DASH_TIME) : 0;
       const airCarry = this.airborne && !this.airDashUntil ? GROUND_DASH_AIR_SPEED : 1;
-      this.speed = this.baseSpeed + boost + dash * airCarry;
+      const brake = this.braking ? Math.min(this.baseSpeed * SLIDE_BRAKE_FRACTION, MAX_SLIDE_BRAKE) : 0;
+      this.speed = this.baseSpeed + boost + dash * airCarry - brake;
       const from = { x: this.x, y: this.height, z: this.distance };
       const to = { x: this.x + (laneX(this.lane) - this.x) * (1 - Math.exp(-23 * STEP)),
         y: this.height, z: this.distance + this.speed * STEP };
@@ -390,6 +408,8 @@
         this.height = y;
         this.distance = z;
         this.crash = obstacle;
+        this.queuedSlide = false;
+        this.landingSlideUntil = -1;
         this.onEvent('crash', { ...obstacle, impact: { x, y, z } });
         return;
       }
@@ -401,9 +421,9 @@
         this.verticalSpeed = 0;
         this.airborne = false;
         this.onEvent('land');
-        if (this.queuedTap) this.boost();
-        else this.landingTapUntil = this.time + TAP_LATE;
-        this.queuedTap = false;
+        if (this.queuedSlide) this.powerSlide();
+        else this.landingSlideUntil = this.time + SLIDE_LATE;
+        this.queuedSlide = false;
       }
       const oldest = this.obstacles[0];
       const rearLimit = this.distance - this.viewDistance * 0.15;

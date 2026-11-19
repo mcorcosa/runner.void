@@ -41,7 +41,7 @@
       <div class="title-rule" aria-hidden="true"></div>
       <h1 id="game-title" aria-label="run.void">run.<br aria-hidden="true"><span>void</span></h1>
       <p>Jump hurdles and short spike patches. Dash midair over long spikes. Change lanes before yellow roadblocks.</p>
-      <p class="touch-instructions">Swipe sideways to move. Swipe up to jump, then again at landing for a boost. Tap Dash with either finger.</p>
+      <p class="touch-instructions">Swipe sideways to move, up to jump, and down to slide. Slide at touchdown for a speed boost. Tap Dash with either finger.</p>
       <div class="actions">
         <button id="start" type="button">Start run</button>
         <button id="install" class="install-trigger" type="button" aria-haspopup="dialog" hidden>Install</button>
@@ -124,7 +124,7 @@
     <div class="feedback" id="feedback" role="status"></div>
 
     <div class="touch-dock" id="touch-controls" role="group" aria-label="Touch controls" hidden>
-      <div class="swipe-guide"><span>← / → &nbsp; Swipe to move</span><span>↑ &nbsp; Swipe to jump / boost</span></div>
+      <div class="swipe-guide"><span>← / → &nbsp; Swipe to move</span><span>↑ &nbsp; Swipe to jump</span><span>↓ &nbsp; Swipe to slide</span></div>
       <button id="touch-dash" class="touch-dash" type="button" aria-label="Dash" aria-describedby="touch-dash-label">
         <span>Dash</span><span id="touch-dash-label" class="touch-dash-label">Ready</span>
         <span class="charge" aria-hidden="true"><i id="touch-charge"></i></span>
@@ -133,8 +133,9 @@
 
     <footer class="controls" aria-label="Keyboard controls">
       <div class="control"><div class="keys"><kbd aria-label="Left Arrow">←</kbd><kbd aria-label="Right Arrow">→</kbd><span class="divider" aria-hidden="true">/</span><kbd>A</kbd><kbd>D</kbd></div><span>Change lane</span></div>
-      <div class="control"><div class="keys"><kbd>Space</kbd></div><span>Jump <span class="divider">/</span> Tap again at landing to boost</span></div>
-      <div class="control"><div class="keys"><kbd>W</kbd><kbd>X</kbd></div><span>Dash <span class="divider">/</span> Break cracked barriers on contact</span></div>
+      <div class="control"><div class="keys"><kbd>Space</kbd></div><span>Jump</span></div>
+      <div class="control"><div class="keys"><kbd aria-label="Down Arrow">↓</kbd><kbd>S</kbd></div><span>Slide <span class="divider">/</span> Power slide at touchdown</span></div>
+      <div class="control"><div class="keys"><kbd>W</kbd><kbd>X</kbd></div><span>Dash <span class="divider">/</span> Break cracked barriers</span></div>
       <div class="dash-meter" aria-hidden="true"><span id="dash-label">Dash ready</span><div class="charge"><i id="charge"></i></div></div>
     </footer>
   </main>

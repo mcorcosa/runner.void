@@ -37,46 +37,152 @@ test('a low hurdle is jumpable, a missed obstacle ends the run, and barriers are
 
   const clean = new Run({ scenario: 'hurdle' });
   until(clean, () => clean.distance >= 28);
-  clean.jumpOrTap();
+  clean.jump();
   until(clean, () => clean.distance > 48);
   assert.equal(clean.crash, null);
 
   const tall = new Run({ scenario: 'barrier' });
   until(tall, () => tall.distance >= 28);
-  tall.jumpOrTap();
+  tall.jump();
   until(tall, () => tall.crash);
   assert.equal(tall.crash.type, 'barrier');
 });
 
-test('landing taps reward fresh presses just before or after touchdown and expire', () => {
-  const early = new Run({ scenario: 'landing' });
-  early.jumpOrTap();
-  until(early, () => early.tapOpen);
+test('a regular ground slide briefly slows forward travel without blocking movement or jumping', () => {
+  for (const speed of [32, 64, 572]) {
+    const run = new Run({ scenario: 'landing' });
+    run.baseSpeed = speed;
+    run.slide();
+    assert.equal(run.sliding, true);
+    assert.equal(run.boosting, false);
+    assert.equal(run.airborne, false);
+    run.tick();
+    assert.equal(run.speed, run.baseSpeed - Math.min(run.baseSpeed * 0.08, 12));
+    assert.equal(run.distance, run.speed * STEP);
+    run.move(1);
+    run.tick();
+    assert.equal(run.lane, 3);
+    assert.ok(run.x > 0);
+    const slideEnd = run.slideUntil;
+    run.slide();
+    assert.equal(run.slideUntil, slideEnd);
+    until(run, () => !run.sliding);
+    assert.ok(run.time - 0.34 < STEP && run.time >= 0.34);
+    assert.equal(run.speed, run.baseSpeed);
+    run.slide();
+    run.jump();
+    run.tick();
+    assert.equal(run.airborne, true);
+    assert.equal(run.sliding, false);
+    assert.equal(run.speed, run.baseSpeed);
+  }
+});
+
+test('a fresh slide just before or after touchdown gives one +15 m/s power slide for 0.85 s', () => {
+  const events = [];
+  const early = new Run({ scenario: 'landing', onEvent: (event) => events.push(event) });
+  early.jump();
+  until(early, () => early.slideWindowOpen);
   assert.equal(early.airborne, true);
-  early.jumpOrTap();
+  assert.ok(early.touchdownIn() <= 0.13 && early.touchdownIn() > 0.13 - STEP);
+  early.slide();
+  early.slide();
   assert.equal(early.boosting, false);
+  assert.equal(early.sliding, false);
   until(early, () => !early.airborne);
+  const touchdown = early.time;
   assert.equal(early.boosting, true);
+  assert.equal(early.sliding, true);
+  assert.equal(early.slideWindowOpen, false);
+  early.slide();
+  assert.deepEqual(events, ['land', 'boost']);
   early.tick();
   assert.equal(early.speed, early.baseSpeed + 15);
   until(early, () => !early.boosting);
+  assert.ok(early.time - touchdown - 0.85 < STEP && early.time - touchdown >= 0.85);
   assert.equal(early.speed, early.baseSpeed);
 
   const late = new Run({ scenario: 'landing' });
-  late.jumpOrTap();
+  late.jump();
   until(late, () => !late.airborne);
-  late.jumpOrTap();
+  const landedAt = late.time;
+  assert.equal(late.landingSlideUntil, landedAt + 0.09);
+  until(late, () => late.time >= landedAt + 0.08);
+  late.slide();
   assert.equal(late.boosting, true);
   assert.equal(late.airborne, false);
+});
 
+test('early slide presses and additional jumps miss the power slide window', () => {
   const missed = new Run({ scenario: 'landing' });
-  missed.jumpOrTap();
+  missed.jump();
   until(missed, () => missed.time > 0.2);
-  missed.jumpOrTap();
+  missed.slide();
+  until(missed, () => missed.slideWindowOpen);
+  missed.jump();
   until(missed, () => missed.time > 1);
   assert.equal(missed.boosting, false);
-  missed.jumpOrTap();
+  assert.equal(missed.sliding, false);
+  missed.slide();
+  assert.equal(missed.sliding, true);
+  assert.equal(missed.boosting, false);
+  missed.jump();
+  until(missed, () => !missed.airborne);
+  assert.equal(missed.slideWindowOpen, true);
+  missed.jump();
   assert.equal(missed.airborne, true);
+  assert.equal(missed.slideWindowOpen, false);
+  assert.equal(missed.boosting, false);
+});
+
+test('an air dash retimes the slide window until after the glide', () => {
+  for (const tryAgain of [false, true]) {
+    const events = [];
+    const run = new Run({ scenario: 'landing', onEvent: (event) => events.push(event) });
+    run.jump();
+    until(run, () => run.slideWindowOpen);
+    run.slide();
+    run.dash();
+    assert.equal(run.queuedSlide, false);
+    assert.equal(run.slideWindowOpen, false);
+    run.slide();
+    until(run, () => run.slideWindowOpen);
+    assert.ok(run.time > run.airDashUntil - 0.13);
+    if (tryAgain) run.slide();
+    until(run, () => !run.airborne);
+    assert.equal(run.boosting, tryAgain);
+    assert.deepEqual(events, tryAgain ? ['dash', 'land', 'boost'] : ['dash', 'land']);
+  }
+});
+
+test('sliding preserves collision and dash rules, and a crash cancels a queued power slide', () => {
+  const hurdle = new Run({ scenario: 'hurdle' });
+  until(hurdle, () => hurdle.distance >= 39);
+  hurdle.slide();
+  until(hurdle, () => hurdle.crash);
+  assert.equal(hurdle.crash.type, 'hurdle');
+  assert.equal(hurdle.sliding, true);
+
+  const dash = new Run({ scenario: 'barrier' });
+  until(dash, () => dash.distance >= 38);
+  dash.slide();
+  dash.dash();
+  until(dash, () => dash.dashSpent);
+  assert.equal(dash.sliding, true);
+  assert.equal(dash.crash, null);
+
+  const events = [];
+  const run = new Run({ scenario: 'landing', onEvent: (event) => events.push(event) });
+  run.jump();
+  until(run, () => run.slideWindowOpen);
+  run.slide();
+  run.addObstacle(run.distance + 0.8, run.lane, 'barrier');
+  until(run, () => run.crash);
+  run.slide();
+  assert.deepEqual(events, ['crash']);
+  assert.equal(run.queuedSlide, false);
+  assert.equal(run.slideWindowOpen, false);
+  assert.equal(run.boosting, false);
 });
 
 test('dash breaks on swept contact in the physical lane, with effects at the barrier face', () => {
@@ -172,7 +278,7 @@ function crossSpikes({ pace = '', scenario = 'spike-long', jumpAt, dashAt = Infi
   const patch = run.obstacles[0];
   while (!run.crash && run.distance < patch.end + 1) {
     if (run.distance >= jumpAt) {
-      run.jumpOrTap();
+      run.jump();
       jumpAt = Infinity;
     }
     if (run.distance >= dashAt) {
@@ -211,8 +317,8 @@ test('two tiles defeat jump-only and boosted pre-dash then jump across both pace
         if (!run.crash) run.dash();
         until(run, () => run.distance >= jumpAt || run.crash);
         if (!run.crash) {
-          run.boost();
-          run.jumpOrTap();
+          run.powerSlide();
+          run.jump();
           until(run, () => run.crash || run.distance > run.obstacles[0].end + 1);
         }
         assert.equal(run.crash?.type, 'spikes', `pace=${pace} jump=${jumpAt} lead=${groundDashLead}`);
@@ -221,13 +327,13 @@ test('two tiles defeat jump-only and boosted pre-dash then jump across both pace
 
     const run = new Run({ scenario: 'spike-long', pace });
     until(run, () => run.distance >= (pace ? 20 : 49));
-    run.jumpOrTap();
-    until(run, () => run.tapOpen);
-    run.jumpOrTap();
+    run.jump();
+    until(run, () => run.slideWindowOpen);
+    run.slide();
     until(run, () => !run.airborne);
     assert.equal(run.boosting, true);
     run.dash();
-    run.jumpOrTap();
+    run.jump();
     assert.equal(run.airDashed, false);
     until(run, () => run.crash);
     assert.equal(run.crash.type, 'spikes');
@@ -251,7 +357,7 @@ test('closures stop a dash at the start edge, catch lateral entry, and allow ree
   for (const pace of ['', 'fast']) {
     const closed = new Run({ scenario: 'gap', pace });
     until(closed, () => closed.distance >= 52);
-    closed.jumpOrTap();
+    closed.jump();
     closed.dash();
     until(closed, () => closed.crash);
     assert.equal(closed.crash.type, 'roadblock');
@@ -262,7 +368,7 @@ test('closures stop a dash at the start edge, catch lateral entry, and allow ree
     const lateral = new Run({ scenario: 'gap', pace });
     lateral.move(-1);
     until(lateral, () => lateral.distance >= 86);
-    lateral.jumpOrTap();
+    lateral.jump();
     lateral.dash();
     lateral.move(1);
     until(lateral, () => lateral.crash);
@@ -417,10 +523,10 @@ test('high speed keeps short jumps and the two-tile airborne dash contract', () 
       const end = run.addSpikes(start, 2, tiles, 1);
       until(run, () => run.distance >= start - speed * 0.16);
       if (tactic === 'ground burst') {
-        run.boost();
+        run.powerSlide();
         run.dash();
       }
-      run.jumpOrTap();
+      run.jump();
       if (tactic === 'air dash') {
         until(run, () => run.distance >= start + speed * 0.08);
         run.dash();
@@ -444,12 +550,12 @@ test('high-speed sweeps hit consecutive barriers in one step and only break the 
   assert.ok(Math.abs(run.distance - 3.82) < 1e-9);
 });
 
-test('dash and landing boost add speed at 572 m/s and expire while base speed keeps rising', () => {
+test('dash and power slide add speed at 572 m/s and expire while base speed keeps rising', () => {
   const run = new Run({ scenario: 'landing' });
   run.baseSpeed = run.speed = 572;
-  run.jumpOrTap();
-  until(run, () => run.tapOpen);
-  run.jumpOrTap();
+  run.jump();
+  until(run, () => run.slideWindowOpen);
+  run.slide();
   until(run, () => run.boosting);
   run.dash();
   run.tick();
@@ -903,29 +1009,44 @@ test('install visibility follows appinstalled, standalone, confirmed installs, a
   assert.equal(reload.ids.install.hidden, true);
 });
 
-test('page wiring renders a frame and rejects held Space, then accepts a fresh touchdown tap', () => {
+test('keyboard uses S and Down for slides, requires a fresh press, and keeps Space for jumping', () => {
   const game = browserHarness('landing');
+  function stepToWindow() {
+    for (let frame = 0; frame < 65 && !game.runner.slideWindowOpen; frame++) game.step(1);
+    assert.equal(game.ids.feedback.textContent, 'Power slide now · ↓ / S');
+  }
   game.step(1);
   assert.ok(game.draws() > 100);
   game.key('keydown', 'Enter');
   game.key('keyup', 'Enter');
+  game.step(1);
   assert.equal(game.dom.body.dataset.mode, 'running');
+  assert.equal(game.key('keydown', 'KeyS'), true);
+  game.step(2);
+  assert.equal(game.ids.feedback.textContent, 'Sliding');
+  assert.ok(game.runner.speed < game.runner.baseSpeed);
   game.key('keydown', 'Space');
-  game.step(47);
-  assert.equal(game.ids.feedback.textContent, 'Tap Space now');
-  game.key('keydown', 'Space', true);
+  stepToWindow();
+  game.key('keydown', 'KeyS', true);
+  game.key('keydown', 'KeyS');
+  game.key('keyup', 'Space');
   game.key('keydown', 'Space');
   game.step(16);
   assert.equal(game.dom.body.dataset.boost, 'false');
+  assert.equal(game.runner.airborne, false);
+  assert.equal(game.runner.sliding, false);
+  game.key('keyup', 'KeyS');
   game.key('keyup', 'Space');
   game.key('keydown', 'Space');
   game.key('keyup', 'Space');
-  game.step(47);
-  game.key('keydown', 'Space');
+  stepToWindow();
+  assert.equal(game.key('keydown', 'ArrowDown'), true);
+  assert.equal(game.runner.queuedSlide, true);
   assert.equal(game.speedStrokes(), 0);
-  game.step(8);
+  game.step(12);
   assert.equal(game.dom.body.dataset.boost, 'true');
-  assert.equal(game.ids.feedback.textContent, 'Landing boost');
+  assert.equal(game.ids.feedback.textContent, 'Power slide');
+  assert.equal(game.runner.sliding, true);
   assert.ok(game.speedStrokes() > 0);
   assert.equal(game.dashStrokes(), 0);
 });
@@ -1033,9 +1154,9 @@ test('long-spike guidance distinguishes warning, jump, air dash, and touchdown',
   assert.equal(game.ids.feedback.textContent, 'Air dash now · W / X');
   game.key('keydown', 'KeyW');
   game.step(1);
-  assert.equal(game.ids.feedback.textContent, 'Tap Space at landing');
-  for (let frame = 0; frame < 100 && game.ids.feedback.textContent !== 'Tap Space now'; frame++) game.step(1);
-  assert.equal(game.ids.feedback.textContent, 'Tap Space now');
+  assert.equal(game.ids.feedback.textContent, 'Slide at touchdown · ↓ / S');
+  for (let frame = 0; frame < 100 && !game.runner.slideWindowOpen; frame++) game.step(1);
+  assert.equal(game.ids.feedback.textContent, 'Power slide now · ↓ / S');
 });
 
 test('W keeps the blue edge effect and badge active late in the dash', () => {
@@ -1107,7 +1228,7 @@ test('A and D move one lane each and repeated events do not move again', () => {
   assert.ok(Number(game.ids.distance.textContent) > 104);
 });
 
-test('touch swipes fire on movement once, discard taps and downward gestures, and keep keyboard input', () => {
+test('touch swipes fire once per gesture for movement or slides and keep keyboard input', () => {
   const game = browserHarness('landing', { touch: true });
   const field = 'swipe-field';
   assert.equal(game.ids['touch-controls'].hidden, true);
@@ -1128,12 +1249,17 @@ test('touch swipes fire on movement once, discard taps and downward gestures, an
 
   game.pointer(field, 'pointerdown', 2, 110, 180);
   game.pointer(field, 'pointerup', 2, 110, 180);
+  assert.equal(game.runner.sliding, false);
   game.pointer(field, 'pointerdown', 3, 110, 180);
   game.pointer(field, 'pointermove', 3, 113, 225);
   game.pointer(field, 'pointermove', 3, 108, 125);
   game.pointer(field, 'pointerup', 3, 108, 125);
   assert.equal(game.runner.lane, 3);
   assert.equal(game.runner.airborne, false);
+  assert.equal(game.runner.sliding, true);
+  game.step(2);
+  assert.equal(game.ids.feedback.textContent, 'Sliding');
+  assert.ok(game.runner.speed < game.runner.baseSpeed);
 
   game.pointer(field, 'pointerdown', 4, 110, 180);
   game.pointer(field, 'pointermove', 4, 70, 176);
@@ -1144,34 +1270,45 @@ test('touch swipes fire on movement once, discard taps and downward gestures, an
   assert.equal(game.ids['touch-controls'].hidden, false);
 });
 
-test('only a fresh upward swipe in the landing window earns the touch boost', () => {
+test('only a fresh downward swipe in the landing window earns a touch power slide', () => {
   const game = browserHarness('landing', { touch: true });
   const field = 'swipe-field';
-  function swipeUp(id) {
+  function swipe(id, deltaY) {
     game.pointer(field, 'pointerdown', id, 110, 210);
-    game.pointer(field, 'pointermove', id, 110, 184);
+    game.pointer(field, 'pointermove', id, 110, 210 + deltaY);
   }
   function stepToWindow() {
-    for (let frame = 0; frame < 65 && !game.runner.tapOpen; frame++) game.step(1);
-    assert.equal(game.ids.feedback.textContent, 'Swipe up now · Landing boost');
+    for (let frame = 0; frame < 65 && !game.runner.slideWindowOpen; frame++) game.step(1);
+    assert.equal(game.ids.feedback.textContent, 'Power slide now · Swipe down');
   }
   game.ids.start.events.click();
   game.step(1);
-  swipeUp(1);
+  swipe(1, -26);
   assert.equal(game.runner.airborne, true);
   stepToWindow();
-  game.pointer(field, 'pointermove', 1, 110, 120);
+  game.pointer(field, 'pointermove', 1, 110, 250);
+  assert.equal(game.runner.queuedSlide, false);
+  game.pointer(field, 'pointerup', 1, 110, 250);
+  swipe(2, -26);
+  game.pointer(field, 'pointerup', 2, 110, 184);
   game.step(16);
   assert.equal(game.runner.boosting, false);
-  game.pointer(field, 'pointerup', 1, 110, 120);
 
-  swipeUp(2);
-  game.pointer(field, 'pointerup', 2, 110, 184);
+  swipe(3, -26);
+  game.pointer(field, 'pointerup', 3, 110, 184);
+  swipe(4, 26);
   stepToWindow();
-  swipeUp(3);
+  game.pointer(field, 'pointermove', 4, 110, 275);
+  assert.equal(game.runner.queuedSlide, false);
+  game.pointer(field, 'pointerup', 4, 110, 275);
+  swipe(5, 26);
+  assert.equal(game.runner.queuedSlide, true);
   game.step(12);
   assert.equal(game.runner.boosting, true);
-  assert.equal(game.ids.feedback.textContent, 'Landing boost');
+  assert.equal(game.ids.feedback.textContent, 'Power slide');
+  const boostEnd = game.runner.boostUntil;
+  game.pointer(field, 'pointermove', 5, 110, 285);
+  assert.equal(game.runner.boostUntil, boostEnd);
 });
 
 test('a second finger can dash independently, with immediate input and a live charge readout', () => {
@@ -1261,6 +1398,9 @@ test('crash and touch restart clear contacts and restore the Dash control with a
   game.step(1);
   game.pointer(field, 'pointerdown', 1, 110, 180);
   game.pointer('touch-dash', 'pointerdown', 2, 290, 340);
+  while (game.runner.distance < 39) game.step(1);
+  game.pointer(field, 'pointermove', 1, 110, 208);
+  assert.equal(game.runner.sliding, true);
   game.step(95);
   assert.equal(game.dom.body.dataset.mode, 'ended');
   assert.equal(game.ids[field].hidden, true);
@@ -1271,6 +1411,9 @@ test('crash and touch restart clear contacts and restore the Dash control with a
   game.step(1);
   assert.equal(game.ids['touch-controls'].hidden, false);
   assert.equal(game.ids['touch-dash-label'].textContent, 'Ready');
+  assert.equal(game.runner.sliding, false);
+  assert.equal(game.runner.boosting, false);
+  assert.equal(game.runner.slideWindowOpen, false);
   game.pointer(field, 'pointermove', 1, 160, 180);
   assert.equal(game.runner.lane, 2);
   game.pointer(field, 'pointerdown', 3, 110, 180);
@@ -1319,7 +1462,7 @@ test('compact camera keeps the near deck and all lane centers in portrait and sh
   }
 });
 
-test('actual acceleration, dash, and landing boost move the FOV smoothly and within bounds', () => {
+test('actual acceleration, dash, and power slide move the FOV smoothly and within bounds', () => {
   const { Scene } = browserHarness('camera');
   const view = Object.assign(Object.create(Scene.prototype), { reduceMotion: false, openingBlend: 0,
     width: 1440, height: 900, insets: [0, 0, 0, 0], particles: [] });
@@ -1353,9 +1496,9 @@ test('actual acceleration, dash, and landing boost move the FOV smoothly and wit
   const afterDash = advance(1.6);
   assert.ok(Math.abs(afterDash - settledAt(run.speed)) < baseline * 0.004);
 
-  run.jumpOrTap();
-  while (!run.tapOpen) advance(STEP);
-  run.jumpOrTap();
+  run.jump();
+  while (!run.slideWindowOpen) advance(STEP);
+  run.slide();
   while (!run.boosting) advance(STEP);
   const boost = advance(0.24);
   assert.ok(boost < settledAt(run.baseSpeed) - baseline * 0.02);

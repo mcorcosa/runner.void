@@ -17,6 +17,12 @@
   const results = document.querySelector('.results');
   const startButton = byId('start');
   const restartButton = byId('restart');
+  const installButton = byId('install');
+  const installGuide = byId('install-guide');
+  const installDone = byId('install-done');
+  const installHostNote = byId('install-host-note');
+  const installAppleSteps = byId('install-apple-steps');
+  const installBrowserSteps = byId('install-browser-steps');
   const distance = byId('distance');
   const speed = byId('speed');
   const feedback = byId('feedback');
@@ -29,11 +35,24 @@
   const swipeContacts = new Set();
   const SWIPE_DISTANCE = 24;
   const SWIPE_DOMINANCE = 1.2;
+  const MAX_STEPS_PER_FRAME = 24;
+  const INSTALLED_KEY = 'void-runner-installed';
+  const appDisplayMode = matchMedia('(display-mode: standalone), (display-mode: fullscreen)');
+  const appleMobile = /iPhone|iPad|iPod/.test(navigator.userAgent) ||
+    (/Mac/.test(navigator.platform) && navigator.maxTouchPoints > 1);
   const gameKeys = ['ArrowLeft', 'KeyA', 'ArrowRight', 'KeyD', 'Space', 'KeyX', 'KeyW', 'Enter'];
   let touchLayout = matchMedia('(pointer: coarse)').matches;
   let touchCues = touchLayout;
   let swipe = null;
   let dashPointer = null;
+  let runTouchRelease = null;
+  let fullscreenPending = false;
+  let nativeInstallOffer = null;
+  let offerSeen = false;
+  let installPending = false;
+  let guideOpen = false;
+  let installedThisPage = false;
+  let installedHint = readInstallHint();
   let mode = 'ready';
   let message = null;
   let lag = 0;
@@ -48,10 +67,108 @@
     document.body.dataset.touch = String(touchLayout);
     swipeField.hidden = mode !== 'running';
     touchControls.hidden = !touchLayout || mode !== 'running';
+    updateInstallButton();
   }
 
-  function useTouch(event) {
-    if (event.pointerType !== 'touch') return;
+  function runningAsApp() {
+    return navigator.standalone === true || appDisplayMode.matches;
+  }
+
+  function readInstallHint() {
+    try { return window.localStorage?.getItem(INSTALLED_KEY) === 'yes'; }
+    catch { return false; }
+  }
+
+  function rememberInstall(value) {
+    installedHint = value;
+    try {
+      if (value) window.localStorage?.setItem(INSTALLED_KEY, 'yes');
+      else window.localStorage?.removeItem(INSTALLED_KEY);
+    } catch {
+      // The current page can keep its install state when browser storage is unavailable.
+    }
+  }
+
+  function updateInstallButton() {
+    installButton.hidden = mode !== 'ready' || runningAsApp() || installedThisPage || installedHint ||
+      !(appleMobile || touchLayout || offerSeen);
+    installButton.setAttribute('aria-disabled', String(installPending));
+    if (mode === 'ready' && installButton.hidden && document.activeElement === installButton) {
+      startButton.focus({ preventScroll: true });
+    }
+  }
+
+  function openInstallGuide() {
+    if (guideOpen) return;
+    guideOpen = true;
+    installHostNote.hidden = location.protocol === 'http:' || location.protocol === 'https:';
+    installAppleSteps.hidden = !appleMobile;
+    installBrowserSteps.hidden = appleMobile;
+    if (typeof installGuide.showModal === 'function') installGuide.showModal();
+    else {
+      intro.inert = true;
+      installGuide.setAttribute('open', '');
+    }
+    installDone.focus({ preventScroll: true });
+  }
+
+  function dismissInstallGuide() {
+    if (!guideOpen) return;
+    guideOpen = false;
+    if (typeof installGuide.close === 'function') installGuide.close();
+    else {
+      installGuide.removeAttribute('open');
+      intro.inert = false;
+    }
+    if (mode === 'ready') (installButton.hidden ? startButton : installButton).focus({ preventScroll: true });
+  }
+
+  function captureInstallOffer(event) {
+    if (typeof event.prompt !== 'function') return;
+    event.preventDefault();
+    if (installedThisPage || runningAsApp()) return;
+    if (installedHint) rememberInstall(false);
+    nativeInstallOffer = event;
+    offerSeen = true;
+    updateInstallButton();
+  }
+
+  function onInstalled() {
+    installedThisPage = true;
+    nativeInstallOffer = null;
+    rememberInstall(true);
+    updateInstallButton();
+    dismissInstallGuide();
+  }
+
+  async function activateInstall() {
+    if (installButton.hidden || guideOpen || installPending) return;
+    const offer = nativeInstallOffer;
+    if (!offer) {
+      openInstallGuide();
+      return;
+    }
+
+    // A browser offer can only be used once. Call it inside this click before awaiting its result.
+    nativeInstallOffer = null;
+    installPending = true;
+    updateInstallButton();
+    try {
+      const response = await offer.prompt();
+      const choice = response?.outcome ? response : await offer.userChoice;
+      if (choice?.outcome === 'accepted') onInstalled();
+    } catch {
+      if (!installButton.hidden) openInstallGuide();
+    } finally {
+      installPending = false;
+      updateInstallButton();
+      if (!installButton.hidden && !guideOpen && document.activeElement === document.body) {
+        installButton.focus({ preventScroll: true });
+      }
+    }
+  }
+
+  function markTouchInput() {
     touchCues = true;
     if (!touchLayout) {
       touchLayout = true;
@@ -59,8 +176,13 @@
     }
   }
 
+  function useTouch(event) {
+    if (event.pointerType === 'touch') markTouchInput();
+  }
+
   function clearContacts() {
     swipe = null;
+    runTouchRelease = null;
     for (const id of swipeContacts) {
       if (swipeField.hasPointerCapture(id)) swipeField.releasePointerCapture(id);
     }
@@ -112,6 +234,48 @@
 
   function endTouchDash(event) {
     if (dashPointer === event.pointerId) dashPointer = null;
+  }
+
+  function requestGameFullscreen() {
+    if (fullscreenPending || runningAsApp() ||
+        document.fullscreenElement || document.fullscreen || document.webkitFullscreenElement ||
+        document.webkitCurrentFullScreenElement || document.webkitIsFullScreen) return;
+
+    try {
+      let request;
+      if (document.fullscreenEnabled !== false && typeof game.requestFullscreen === 'function') {
+        request = game.requestFullscreen({ navigationUI: 'hide' });
+      } else if (document.webkitFullscreenEnabled !== false) {
+        const webkitRequest = game.webkitRequestFullscreen || game.webkitRequestFullScreen;
+        if (typeof webkitRequest === 'function') request = webkitRequest.call(game);
+      }
+      if (request?.then) {
+        fullscreenPending = true;
+        const finish = () => { fullscreenPending = false; };
+        Promise.resolve(request).then(finish, finish);
+      }
+    } catch {
+      // The run can begin in the browser viewport if a native request fails.
+      fullscreenPending = false;
+    }
+  }
+
+  function rememberRunTouch(event) {
+    if (event.isTrusted && event.pointerType === 'touch') {
+      // Some browsers follow a touch release with a click that carries no touch pointer type.
+      runTouchRelease = { button: event.currentTarget, expires: Date.now() + 750 };
+    }
+  }
+
+  function activateRunButton(event) {
+    if (mode === 'running' || guideOpen || installPending) return;
+    const touchClick = event?.isTrusted && (event.pointerType === 'touch' || event.sourceCapabilities?.firesTouchEvents ||
+      (event.detail > 0 && runTouchRelease && runTouchRelease.button === event.currentTarget && Date.now() <= runTouchRelease.expires));
+    if (touchClick) {
+      markTouchInput();
+      requestGameFullscreen();
+    }
+    start();
   }
 
   function start() {
@@ -225,7 +389,24 @@
 
   function keyDown(event) {
     const key = event.code;
+    if (guideOpen) {
+      if (key === 'Escape') {
+        event.preventDefault();
+        dismissInstallGuide();
+      } else if (key === 'Tab') {
+        event.preventDefault();
+        installDone.focus({ preventScroll: true });
+      } else if (event.repeat && (key === 'Enter' || key === 'Space')) {
+        event.preventDefault();
+      }
+      return;
+    }
+    if (installPending) return;
     if (!gameKeys.includes(key) || event.ctrlKey || event.altKey || event.metaKey) return;
+    if (event.target === installButton && (key === 'Space' || key === 'Enter')) {
+      if (event.repeat) event.preventDefault();
+      return;
+    }
     if (event.target === touchDash && (key === 'Space' || key === 'Enter')) return;
     // Allow native keyboard activation of buttons outside a run.
     if (mode !== 'running' && key === 'Space' && event.target instanceof HTMLButtonElement) return;
@@ -243,22 +424,42 @@
   }
 
   function frame(now) {
-    const dt = previousFrame === null ? 0 : Math.min((now - previousFrame) / 1000, 0.1);
+    const elapsed = previousFrame === null ? 0 : (now - previousFrame) / 1000;
     previousFrame = now;
     if (mode === 'running') {
-      lag += dt;
-      while (lag >= STEP && mode === 'running') {
+      lag += elapsed;
+      // Preserve elapsed play time while limiting how much a delayed frame can process at once.
+      for (let steps = 0; lag >= STEP && mode === 'running' && steps < MAX_STEPS_PER_FRAME; steps++) {
         lag -= STEP;
         run.tick();
       }
     }
     updateHud();
-    scene.draw(run, now / 1000, dt, mode);
+    scene.draw(run, now / 1000, Math.min(elapsed, 0.1), mode);
     requestAnimationFrame(frame);
   }
 
-  startButton.addEventListener('click', start);
-  restartButton.addEventListener('click', start);
+  for (const button of [startButton, restartButton]) {
+    button.addEventListener('pointerdown', () => { runTouchRelease = null; });
+    button.addEventListener('pointercancel', () => { runTouchRelease = null; });
+    button.addEventListener('pointerup', rememberRunTouch);
+    button.addEventListener('click', activateRunButton);
+  }
+  installButton.addEventListener('click', activateInstall);
+  installDone.addEventListener('click', dismissInstallGuide);
+  installGuide.addEventListener('click', (event) => {
+    if (event.target === installGuide) dismissInstallGuide();
+  });
+  installGuide.addEventListener('cancel', (event) => {
+    event.preventDefault();
+    dismissInstallGuide();
+  });
+  window.addEventListener('beforeinstallprompt', captureInstallOffer);
+  window.addEventListener('appinstalled', onInstalled);
+  appDisplayMode.addEventListener?.('change', () => {
+    updateInstallButton();
+    if (runningAsApp()) dismissInstallGuide();
+  });
   game.addEventListener('pointerdown', useTouch);
   swipeField.addEventListener('pointerdown', beginSwipe);
   swipeField.addEventListener('pointermove', moveSwipe);
@@ -277,16 +478,20 @@
     held.clear();
     clearContacts();
     previousFrame = null;
+    lag = 0;
   }
   window.addEventListener('blur', resetInput);
   window.addEventListener('orientationchange', clearContacts);
   window.screen?.orientation?.addEventListener('change', clearContacts);
   window.visualViewport?.addEventListener('resize', clearContacts);
   document.addEventListener('visibilitychange', resetInput);
-  window.addEventListener('resize', () => {
+  function resizeGame() {
     clearContacts();
     scene.resize();
-  });
+  }
+  window.addEventListener('resize', resizeGame);
+  document.addEventListener('fullscreenchange', resizeGame);
+  document.addEventListener('webkitfullscreenchange', resizeGame);
   new ResizeObserver(() => {
     if (scene.resize()) clearContacts();
   }).observe(canvas);

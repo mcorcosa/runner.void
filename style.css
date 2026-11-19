@@ -30,6 +30,9 @@ html, body { margin: 0; overflow: hidden; overscroll-behavior: none; }
   overflow: hidden;
   background: #090711;
 }
+.game:fullscreen { width: 100%; height: 100%; }
+.game:-webkit-full-screen { width: 100%; height: 100%; }
+.game::backdrop { background: #090711; }
 body[data-mode="running"] .game { touch-action: none; }
 
 canvas, .vignette { position: absolute; inset: 0; width: 100%; height: 100%; }
@@ -132,6 +135,87 @@ button {
 }
 button:hover { background: #e3ccff; box-shadow: 0 2px 28px #ac73ff64; }
 button:focus-visible { outline: 2px solid #fff; outline-offset: 4px; }
+.install-trigger {
+  min-width: 85px;
+  padding-inline: 16px;
+  border-color: #b69dd5;
+  background: #1b142c;
+  color: #f5ebff;
+  box-shadow: none;
+}
+.install-trigger:hover { background: #38274e; box-shadow: none; }
+.install-trigger[aria-disabled="true"] { opacity: 0.7; cursor: wait; }
+.install-guide {
+  position: fixed;
+  inset: 0;
+  z-index: 4;
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  max-height: none;
+  margin: 0;
+  padding: max(12px, var(--safe-top)) var(--gutter-right) max(12px, var(--safe-bottom)) var(--gutter-left);
+  border: 0;
+  background: #080611cc;
+  color: inherit;
+  overflow: auto;
+}
+.install-guide[open] { display: grid; place-items: center; }
+.install-guide:not([open]) { display: none; }
+.install-guide::backdrop { background: transparent; }
+.install-panel {
+  width: min(100%, 430px);
+  max-height: 100%;
+  padding: clamp(17px, 4dvh, 27px);
+  overflow: auto;
+  overscroll-behavior: contain;
+  border: 1px solid #957abd;
+  border-radius: 12px;
+  background: #171125;
+  box-shadow: 0 16px 48px #0009;
+}
+.install-panel h2 { margin: 0 0 11px; font-size: clamp(21px, 5vw, 26px); line-height: 1.14; }
+.install-panel p { margin: 0 0 13px; font-size: 15px; line-height: 1.38; color: var(--soft); }
+.install-steps {
+  display: grid;
+  gap: 6px;
+  margin: 0 0 13px;
+  padding: 0;
+  list-style: none;
+  color: var(--soft);
+  font-size: .875rem;
+  line-height: 1.3;
+}
+.install-steps li {
+  display: grid;
+  grid-template-columns: minmax(0, 44%) minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  padding: 2px 8px 2px 4px;
+  border: 1px solid #bea7eb26;
+  border-radius: 8px;
+  background: #20182f;
+}
+.install-steps small { display: block; margin-top: 2px; font-size: .75rem; }
+.install-picture {
+  display: grid;
+  place-items: center;
+  min-height: 56px;
+}
+.install-picture svg { display: block; width: 100%; max-width: 152px; height: auto; }
+.install-home {
+  align-content: center;
+  gap: 2px;
+  font-size: 11px;
+  font-weight: 600;
+}
+.install-home img { display: block; border-radius: 8px; }
+.install-panel strong { color: #f5ebff; }
+.install-panel button { min-width: 83px; min-height: 44px; }
+@media (min-width: 580px) and (max-height: 500px) {
+  .install-panel:has(.install-steps:not([hidden])) { width: min(100%, 700px); }
+  .install-steps { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
 .shortcut { color: var(--soft); font: 13px var(--mono); white-space: nowrap; }
 
 .controls {
@@ -347,6 +431,25 @@ body[data-touch="true"] .feedback {
   .result-card p { margin: 5px 0 8px; font-size: 14px; }
   .result-distance { margin-bottom: 10px; }
   .intro button, .result-card button { min-height: 44px; }
+  .actions { gap: 10px; }
+  .install-panel { padding: 14px 17px; }
+  .install-panel h2 { margin-bottom: 7px; }
+  .install-steps, .install-panel p { margin-bottom: 9px; }
+}
+@media (min-width: 580px) and (max-height: 270px) {
+  .install-panel:has(.install-steps:not([hidden])) {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 6px 12px;
+    padding: 8px 12px;
+  }
+  .install-panel:has(.install-steps:not([hidden])) > :is(h2, p, ol) { margin: 0; }
+  .install-panel:has(.install-steps:not([hidden])) > button { grid-area: 1 / 2; }
+  .install-panel:has(.install-steps:not([hidden])) > :is(p, ol) { grid-column: 1 / -1; }
+  .install-steps { gap: 4px; line-height: 1.2; }
+  .install-steps li { grid-template-columns: minmax(0, 32%) minmax(0, 1fr); gap: 6px; }
+  .install-picture { min-height: 44px; }
 }
 @media (max-width: 480px) and (max-height: 500px) {
   .intro { width: calc(100% - var(--gutter-left) - var(--gutter-right)); }

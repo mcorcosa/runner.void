@@ -5,18 +5,19 @@ Use this guide to start a project with separate chats for ownership, management,
 ## Roles and decision authority
 
 - **Owner** directs the project, sets priorities and constraints, and resolves decisions the project manager escalates.
-- **Project manager (PM)** plans the work, makes decisions within the owner's direction, tracks progress and dependencies, and reports to the owner. The PM opens area manager chats on **Astra High** as needed.
-- **Area managers** manage their assigned areas and report to both the PM and the owner. They assign implementation to separate chats on **Sol High** or **Sol Medium**. Use Sol High for complex or important work and Sol Medium for routine, bounded work. Escalate cross-area dependencies and decisions that exceed the assignment to the PM.
-- **Implementers** make the assigned changes, verify the result, and report back to the assigning manager with the evidence and any remaining issues.
+- **Project manager (PM)** plans the work, makes decisions within the owner's direction, tracks progress and dependencies, and reports to the owner. The PM opens area manager chats on **Astra High** as needed and routes implementation through an area manager.
+- **Area managers (Astra High)** plan and assign work in their areas, independently verify it for acceptance, and report to both the PM and the owner. Escalate cross-area dependencies and decisions that exceed the assignment to the PM.
+- **Implementers** in separate Sol chats own changes to implementation code, tests (including new QA code), assets, configuration, and fixes. They verify the result and report back to the assigning manager with evidence and any remaining issues.
 - **Librarian (Sol High)** verifies and maintains human-readable project documentation for agents and people. The PM and area managers send the Librarian findings and decisions that future chats need.
 
-Managers own coordination and acceptance. Implementers own the assigned changes.
+The PM and area managers own coordination and independent acceptance. They may inspect project files read-only, run existing checks, and playtest. Only the assigned Sol implementer makes implementation changes. The same routing applies when the owner sends an implementation request directly to a manager. The team enforces this division through its handoff and acceptance procedure. Workspace permissions are a separate control.
 
 ## Delegation and reporting
 
-1. In the new chat, state the outcome, scope, relevant paths or links, constraints, how to verify completion, and where to report. Identify the workspace or branch when it matters. Assign clear ownership before starting parallel work that could touch the same files.
-2. Report the result, evidence, and any blocker or decision needed. Include affected paths or links and say what was checked. Managers relay decisions, dependencies, and issues that need action to the people they report to.
-3. Send durable findings and decisions to the Librarian with their source and scope. The Librarian checks findings against the relevant evidence and confirms decisions with the decision owner or their recorded approval. Update the relevant document, label unverified claims or open questions, and report the updated path and verification back to the sender.
+1. For each distinct implementation assignment, the area manager creates a fresh, named, user-visible project chat. Use **Sol High** for complex or important work and **Sol Medium** for bounded work. Revisions to the same assignment may stay with its named Sol owner.
+2. Before any implementation changes, give the implementer a written handoff in the named chat. Record the actual implementer chat ID or link, exact model and reasoning effort, expected outcome, scope, owned paths, constraints, acceptance criteria and checks, and reporting destination. Identify the workspace or branch when it matters. Assign clear ownership before starting parallel work that could touch the same files. If the required Sol chat is missing or delegation is unavailable, hold implementation and escalate the blocker to the PM. The PM escalates unresolved blockers to the owner.
+3. The implementer reports changed files, what they verified, the evidence, and any blocker or decision needed. The assigning manager independently verifies the result against the acceptance criteria, names the Sol chat that did the work, and reports the acceptance outcome and evidence to the PM and owner. Managers relay decisions, dependencies, and issues that need action. Send review findings that require implementation and fixes of any size back to Sol.
+4. Send durable findings and decisions to the Librarian with their source and scope. The Librarian checks findings against the relevant evidence and confirms decisions with the decision owner or their recorded approval. Update the relevant document, label unverified claims or open questions, and report the updated path and verification back to the sender.
 
 ## Reuse and improve this guide
 

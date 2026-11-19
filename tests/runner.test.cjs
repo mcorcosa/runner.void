@@ -3,7 +3,8 @@ const { readFileSync } = require('node:fs');
 const { join } = require('node:path');
 const test = require('node:test');
 const vm = require('node:vm');
-const { Run, STEP, LANE_COUNT, LANE_WIDTH, START_SPEED, MAX_SPEED, MAX_EXTRA_SPEED, REACTION_TIME, laneX } = require('../game.js');
+const { Run, STEP, LANE_COUNT, LANE_WIDTH, START_SPEED, FAST_START_SPEED, MAX_EXTRA_SPEED, REACTION_TIME,
+  MIN_VIEW_DISTANCE, VIEW_SECONDS, laneX } = require('../game.js');
 
 function until(run, condition) {
   for (let tick = 0; tick < 1_200 && !condition(); tick++) {
@@ -158,7 +159,12 @@ test('the base pace starts at 32 m/s and gains 1.8 m/s per second', () => {
   assert.equal(run.speed, 32);
   until(run, () => run.time >= 1);
   assert.ok(Math.abs(run.speed - (32 + run.time * 1.8)) < 1e-8);
-  assert.equal(MAX_SPEED, 64);
+  const fast = new Run({ scenario: 'landing', pace: 'fast' });
+  assert.equal(fast.speed, FAST_START_SPEED);
+  until(fast, () => fast.time >= 1);
+  assert.ok(fast.speed > 65);
+  assert.equal(new Run({ scenario: 'high-speed' }).speed, 572);
+  assert.equal(new Run({ seed: 187, pace: 'fast' }).speed, START_SPEED);
 });
 
 function crossSpikes({ pace = '', scenario = 'spike-long', jumpAt, dashAt = Infinity }) {
@@ -280,7 +286,7 @@ test('seeded courses keep a reachable route and late-game density across full cl
     let lastEnd = 0;
     let sawSpikes = false;
     let closure = null;
-    let closuresAtCap = 0;
+    let closuresCompleted = 0;
     let previousClosureEnd = 0;
     const lanes = Array.from({ length: LANE_COUNT }, (_, lane) => lane);
     let open = lanes;
@@ -288,17 +294,14 @@ test('seeded courses keep a reachable route and late-game density across full cl
       const z = run.obstacles.find((obstacle) => obstacle.z > lastRow)?.z;
       assert.ok(z > lastRow, 'The next row should be generated ahead of the runner');
       if (closure && z >= closure.gap.end) {
-        const { gap, began, atCap, openNeighbors, beats } = closure;
+        const { gap, began, entrySpeed, openNeighbors, beats } = closure;
         until(run, () => run.distance >= gap.end);
         assert.ok(run.time - began >= 3 - 1 / 120);
         assert.ok(openNeighbors.length >= 1, 'A neighboring lane stays playable through the full closure');
         assert.ok(beats >= 1, 'Long closures include at least one interior row');
-        if (atCap) {
-          assert.ok(gap.end - gap.z >= 3 * (MAX_SPEED + MAX_EXTRA_SPEED));
-          assert.ok(gap.end - gap.z <= Math.ceil(3.5 * (MAX_SPEED + MAX_EXTRA_SPEED)));
-          assert.equal(beats, 2);
-          closuresAtCap++;
-        }
+        assert.ok(gap.end - gap.z >= 3 * (entrySpeed + MAX_EXTRA_SPEED));
+        assert.equal(beats, 2);
+        closuresCompleted++;
         previousClosureEnd = gap.end;
         lastEnd = gap.end;
         open = lanes.filter((lane) => lane !== gap.lane);
@@ -326,25 +329,141 @@ test('seeded courses keep a reachable route and late-game density across full cl
       until(run, () => run.distance > z + 1);
       const approachSpeed = run.baseSpeed;
       until(run, () => run.distance > end + 1);
-      assert.ok(z - lastEnd - 1.4 >= (approachSpeed + MAX_EXTRA_SPEED) * REACTION_TIME);
+      const speedAfterPrevious = Math.sqrt(START_SPEED ** 2 + 3.6 * lastEnd);
+      const minimumReactionDistance = (speedAfterPrevious + MAX_EXTRA_SPEED) * REACTION_TIME + 0.9 * REACTION_TIME ** 2;
+      assert.ok(z - lastEnd - 1.4 >= minimumReactionDistance,
+        `seed ${seed}: ${lastEnd} to ${z} at ${approachSpeed} m/s`);
       const gap = row.find((obstacle) => obstacle.type === 'gap');
       if (gap) {
         assert.equal(closure, null);
-        assert.ok(gap.z - previousClosureEnd >= 360);
-        closure = { gap, began: run.time, atCap: approachSpeed === MAX_SPEED,
+        assert.ok(gap.z - previousClosureEnd >= 3.55 * (START_SPEED + MAX_EXTRA_SPEED));
+        closure = { gap, began: run.time, entrySpeed: approachSpeed,
           openNeighbors: lanes.filter((lane) => Math.abs(lane - gap.lane) === 1), beats: 0 };
       }
       lastRow = z;
       lastEnd = end;
       open = nextOpen;
     }
-    assert.equal(run.baseSpeed, MAX_SPEED);
+    assert.ok(run.baseSpeed > 120);
     assert.equal(sawSpikes, true);
-    assert.ok(closuresAtCap >= 2);
+    assert.ok(closuresCompleted >= 2);
   }
 });
 
-function browserHarness(scenario, { reducedMotion = false, pace = '', touch = false } = {}) {
+test('the endless generator carries a reachable run past 140 m/s and through five minutes at 572 m/s', () => {
+  const run = new Run({ seed: 187 });
+  const gaps = new Map();
+  const seen = new Set();
+  let widestCourseBuffer = 0;
+  for (let tick = 1; tick <= 36_000; tick++) {
+    const upcoming = run.obstacles.find((obstacle) => obstacle.z > run.distance + 8);
+    assert.ok(upcoming || run.lastHazardEnd >= run.distance + run.viewDistance);
+    if (upcoming && upcoming.z - run.distance < run.speed * 0.67) {
+      const blocked = new Set(run.obstacles.filter((obstacle) => obstacle.z === upcoming.z ||
+        (obstacle.type === 'gap' && obstacle.z <= run.distance && obstacle.end > run.distance))
+        .flatMap((obstacle) => Array.from({ length: obstacle.lanes ?? 1 }, (_, offset) => obstacle.lane + offset)));
+      const lane = [run.lane, run.lane - 1, run.lane + 1].find((candidate) =>
+        candidate >= 0 && candidate < LANE_COUNT && !blocked.has(candidate));
+      if (lane !== undefined) run.move(lane - run.lane);
+    }
+    for (const item of run.obstacles) {
+      if (seen.has(item.id)) continue;
+      seen.add(item.id);
+      if (item.type === 'gap') gaps.set(item.id, { gap: item, interior: [] });
+      const containing = [...gaps.values()].find(({ gap }) => item.z > gap.z && item.z < gap.end);
+      if (containing) containing.interior.push(item);
+    }
+    run.tick();
+    assert.equal(run.crash, null);
+    for (const record of gaps.values()) {
+      if (!record.began && run.distance >= record.gap.z) {
+        record.began = run.time;
+        record.entrySpeed = run.baseSpeed;
+      }
+      if (!record.ended && run.distance >= record.gap.end) record.ended = run.time;
+    }
+    widestCourseBuffer = Math.max(widestCourseBuffer, run.obstacles.length);
+    if (tick === 7200 || tick === 36_000) {
+      const elapsed = tick * STEP;
+      assert.ok(Math.abs(run.time - elapsed) < 1e-7);
+      assert.ok(Math.abs(run.speed - (32 + 1.8 * elapsed)) < 1e-7);
+      assert.ok(run.viewDistance >= (run.speed + MAX_EXTRA_SPEED) * VIEW_SECONDS);
+      assert.ok(run.lastHazardEnd >= run.distance + run.viewDistance);
+    }
+  }
+
+  const lateClosures = Array.from(gaps.values()).filter(({ gap }) => gap.z > 70_000 && gap.end < run.distance);
+  assert.ok(lateClosures.length >= 3);
+  for (const { gap, interior, began, ended, entrySpeed } of lateClosures) {
+    const rows = new Set(interior.map(({ z }) => z));
+    const blocked = new Set(interior.map(({ lane }) => lane));
+    assert.equal(rows.size, 2);
+    assert.equal(blocked.has(gap.lane), false);
+    assert.ok([gap.lane - 1, gap.lane + 1].some((lane) => lane >= 0 && lane < LANE_COUNT && !blocked.has(lane)));
+    assert.ok(gap.end - gap.z >= (entrySpeed + MAX_EXTRA_SPEED) * 3);
+    assert.ok(ended - began >= 3 - STEP);
+  }
+  assert.ok(widestCourseBuffer <= 20);
+});
+
+test('high speed keeps short jumps and the two-tile airborne dash contract', () => {
+  for (const speed of [140, 572, 1500]) {
+    for (const [tiles, tactic, passes] of [
+      [1, 'jump', true], [2, 'jump', false], [2, 'ground burst', false], [2, 'air dash', true],
+    ]) {
+      const run = new Run({ scenario: 'landing' });
+      run.baseSpeed = run.speed = speed;
+      const start = speed * 2;
+      const end = run.addSpikes(start, 2, tiles, 1);
+      until(run, () => run.distance >= start - speed * 0.16);
+      if (tactic === 'ground burst') {
+        run.boost();
+        run.dash();
+      }
+      run.jumpOrTap();
+      if (tactic === 'air dash') {
+        until(run, () => run.distance >= start + speed * 0.08);
+        run.dash();
+      }
+      until(run, () => run.crash || run.distance > end + 1);
+      assert.equal(!run.crash, passes, `${speed} m/s, ${tiles} tile(s), ${tactic}`);
+    }
+  }
+});
+
+test('high-speed sweeps hit consecutive barriers in one step and only break the first', () => {
+  const impacts = [];
+  const run = new Run({ scenario: 'landing', onEvent: (event) => impacts.push(event) });
+  run.speed = run.baseSpeed = 572;
+  run.addObstacle(1.1, 2, 'barrier');
+  run.addObstacle(4.5, 2, 'barrier');
+  run.dash();
+  run.tick();
+  assert.deepEqual(impacts, ['dash', 'break', 'crash']);
+  assert.equal(run.crash.z, 4.5);
+  assert.ok(Math.abs(run.distance - 3.82) < 1e-9);
+});
+
+test('dash and landing boost add speed at 572 m/s and expire while base speed keeps rising', () => {
+  const run = new Run({ scenario: 'landing' });
+  run.baseSpeed = run.speed = 572;
+  run.jumpOrTap();
+  until(run, () => run.tapOpen);
+  run.jumpOrTap();
+  until(run, () => run.boosting);
+  run.dash();
+  run.tick();
+  const dashGain = 22 * Math.sqrt((0.7 - STEP) / 0.7);
+  assert.ok(Math.abs(run.speed - run.baseSpeed - 15 - dashGain) < 1e-8);
+  until(run, () => !run.boosting && !run.dashing);
+  assert.equal(run.speed, run.baseSpeed);
+  assert.ok(run.baseSpeed > 575);
+});
+
+function browserHarness(scenario, {
+  reducedMotion = false, pace = '', touch = false, standalone = false, appleStandalone = false,
+  userAgent = '', platform = '', maxTouchPoints = 0, protocol = 'https:', storage,
+} = {}) {
   const read = (file) => readFileSync(join(__dirname, '..', file), 'utf8');
   const source = read('index.html');
   const frames = [];
@@ -355,22 +474,31 @@ function browserHarness(scenario, { reducedMotion = false, pace = '', touch = fa
       this.style = {};
       this.textContent = '';
       this.capture = new Set();
+      this.attributes = new Map();
     }
     addEventListener(type, handler) { this.events[type] = handler; }
     setPointerCapture(id) { this.capture.add(id); }
     hasPointerCapture(id) { return this.capture.has(id); }
     releasePointerCapture(id) { this.capture.delete(id); }
+    setAttribute(name, value) { this.attributes.set(name, String(value)); }
+    getAttribute(name) { return this.attributes.get(name) ?? null; }
+    removeAttribute(name) { this.attributes.delete(name); }
   }
   class Button extends Target {
     blur() { dom.activeElement = dom.body; }
     focus() { dom.activeElement = this; }
   }
+  class Dialog extends Target {
+    showModal() { this.setAttribute('open', ''); }
+    close() { this.removeAttribute('open'); }
+  }
   const ids = Object.fromEntries(Array.from(source.matchAll(/<(\w+)[^>]+id="([\w-]+)"/g),
-    ([, tag, id]) => [id, tag === 'button' ? new Button() : new Target()]));
+    ([, tag, id]) => [id, tag === 'button' ? new Button() : tag === 'dialog' ? new Dialog() : new Target()]));
   const classes = { '.intro': new Target(), '.results': new Target() };
   const dom = Object.assign(new Target(), {
     body: new Target(), getElementById: (id) => ids[id], querySelector: (selector) => classes[selector],
   });
+  dom.body.dataset.mode = 'ready';
   let draws = 0;
   let speedStrokes = 0;
   let dashStrokes = 0;
@@ -387,17 +515,28 @@ function browserHarness(scenario, { reducedMotion = false, pace = '', touch = fa
   }, { get: (target, key) => target[key] ?? noop });
   Object.assign(ids.scene, { clientWidth: 1440, clientHeight: 900, getContext: () => ctx });
   const window = new Target();
+  if (storage) window.localStorage = {
+    getItem: (key) => storage.get(key) ?? null,
+    setItem: (key, value) => storage.set(key, value),
+    removeItem: (key) => storage.delete(key),
+  };
   let insets = {};
   let observeResize;
+  let motionChanged;
   const context = vm.createContext({
     document: dom, window, HTMLButtonElement: Button, devicePixelRatio: 1,
-    matchMedia: (query) => ({ matches: query === '(pointer: coarse)' ? touch : reducedMotion }),
+    navigator: { standalone: appleStandalone, userAgent, platform, maxTouchPoints },
+    matchMedia: (query) => {
+      if (query === '(pointer: coarse)') return { matches: touch };
+      if (query.includes('display-mode')) return { matches: standalone };
+      return { matches: reducedMotion, addEventListener: (event, listener) => { if (event === 'change') motionChanged = listener; } };
+    },
     getComputedStyle: () => ({ getPropertyValue: (prop) => `${insets[prop.slice(7)] ?? 0}px` }),
     ResizeObserver: class {
       constructor(callback) { observeResize = callback; }
       observe() {}
     },
-    URLSearchParams, location: { search: `?scenario=${scenario}&pace=${pace}` },
+    URLSearchParams, location: { search: `?scenario=${scenario}&pace=${pace}`, protocol },
     requestAnimationFrame: (frame) => frames.push(frame),
   });
   for (const [, file] of source.matchAll(/<script src="([^"]+)" defer/g)) {
@@ -416,23 +555,35 @@ function browserHarness(scenario, { reducedMotion = false, pace = '', touch = fa
     dom, ids, classes, Scene: context.VoidScene, draws: () => draws,
     speedStrokes: () => speedStrokes, dashStrokes: () => dashStrokes,
     get scene() { return scene; }, get runner() { return runner; },
-    key: (type, code, repeat = false) => window.events[type]({ code, repeat, preventDefault: noop }),
+    key(type, code, repeat = false, options = {}) {
+      let prevented = false;
+      window.events[type]({ code, repeat, preventDefault: () => { prevented = true; }, ...options });
+      return prevented;
+    },
+    click(target, options = {}) {
+      const element = ids[target];
+      element.events.click({ isTrusted: true, currentTarget: element, detail: 1, ...options });
+    },
     pointer(target, type, pointerId, clientX, clientY, options = {}) {
       const element = ids[target];
       let prevented = false;
       element.events[type]?.({ pointerId, clientX, clientY, pointerType: 'touch', button: 0,
+        isTrusted: true, currentTarget: element,
         preventDefault: () => { prevented = true; }, ...options });
       if (['pointerup', 'pointercancel', 'lostpointercapture'].includes(type)) element.releasePointerCapture(pointerId);
       return prevented;
     },
-    windowEvent: (type) => window.events[type](),
+    windowEvent: (type, event) => window.events[type](event),
     documentEvent: (type) => dom.events[type](),
+    changeReducedMotion: (matches) => motionChanged({ matches }),
     resize(width, height, safe, source = 'resize') {
       Object.assign(ids.scene, { clientWidth: width, clientHeight: height });
       insets = safe;
       if (source === 'observer') observeResize();
+      else if (dom.events[source]) dom.events[source]();
       else window.events[source]();
     },
+    delayFrame(milliseconds) { now += milliseconds; },
     step(count) {
       for (let frame = 0; frame < count; frame++) {
         frames.shift()(now);
@@ -441,6 +592,316 @@ function browserHarness(scenario, { reducedMotion = false, pace = '', touch = fa
     },
   };
 }
+
+test('a native mobile start requests game fullscreen synchronously and manual exit keeps the run', async () => {
+  const page = browserHarness('hurdle', { touch: true });
+  const root = page.ids.game;
+  const viewportRequests = [];
+  let tapping = false;
+  root.requestFullscreen = function ({ navigationUI }) {
+    assert.equal(this, root);
+    assert.ok(tapping);
+    viewportRequests.push([navigationUI, page.dom.body.dataset.mode]);
+    return Promise.resolve();
+  };
+  const tap = (button) => {
+    tapping = true;
+    page.click(button, { pointerType: 'touch' });
+    tapping = false;
+  };
+  page.step(1);
+  tap('start');
+  assert.deepEqual(viewportRequests, [['hide', 'ready']]);
+  assert.equal(page.dom.body.dataset.mode, 'running');
+  assert.equal(page.ids['touch-controls'].hidden, false);
+  await new Promise((resolve) => setImmediate(resolve));
+
+  page.dom.fullscreenElement = root;
+  page.resize(390, 844, { top: 47, bottom: 34 }, 'fullscreenchange');
+  page.step(12);
+  const run = page.runner;
+  const beforeRotation = run.distance;
+  page.pointer('swipe-field', 'pointerdown', 1, 110, 180);
+  page.windowEvent('orientationchange');
+  page.resize(844, 390, { left: 47, bottom: 21 });
+  page.pointer('swipe-field', 'pointermove', 1, 165, 180);
+  page.step(1);
+  assert.equal(page.runner, run);
+  assert.equal(page.scene.width, 844);
+  assert.equal(run.lane, 2);
+  assert.ok(run.distance > beforeRotation);
+
+  page.pointer('swipe-field', 'pointerdown', 2, 110, 180);
+  page.dom.fullscreenElement = null;
+  page.resize(844, 315, { left: 47, bottom: 21 }, 'fullscreenchange');
+  page.pointer('swipe-field', 'pointermove', 2, 170, 180);
+  assert.equal(run.lane, 2);
+  page.step(3);
+  tap('start');
+  assert.equal(page.runner, run);
+  assert.equal(page.scene.height, 315);
+  assert.equal(viewportRequests.length, 1);
+
+  page.step(86);
+  assert.equal(page.dom.body.dataset.mode, 'ended');
+  tap('restart');
+  assert.deepEqual(viewportRequests.at(-1), ['hide', 'ended']);
+  page.step(1);
+  assert.notEqual(page.runner, run);
+  assert.equal(page.runner.distance, 0);
+});
+
+test('desktop inputs, synthetic taps, and a mouse following touch start a run without fullscreen', () => {
+  const interactions = [
+    (page) => page.key('keydown', 'Enter'),
+    (page) => page.click('start', { pointerType: 'mouse' }),
+    (page) => page.click('start', { pointerType: 'touch', isTrusted: false }),
+    (page) => {
+      page.pointer('start', 'pointerup', 1, 10, 10);
+      page.pointer('start', 'pointerdown', 2, 10, 10, { pointerType: 'mouse' });
+      page.click('start', { pointerType: undefined });
+    },
+    (page) => {
+      page.pointer('start', 'pointerup', 1, 10, 10);
+      page.click('start', { pointerType: undefined, detail: 0 });
+    },
+  ];
+  for (const interaction of interactions) {
+    const page = browserHarness('landing', { touch: true });
+    let requests = 0;
+    page.ids.game.requestFullscreen = () => { requests++; };
+    interaction(page);
+    assert.equal(page.dom.body.dataset.mode, 'running');
+    assert.equal(requests, 0);
+  }
+});
+
+test('legacy touch clicks use either WebKit fullscreen method and do not stack on an existing fullscreen', () => {
+  for (const name of ['webkitRequestFullscreen', 'webkitRequestFullScreen']) {
+    const page = browserHarness('hurdle');
+    const root = page.ids.game;
+    let requests = 0;
+    root[name] = function (...args) {
+      assert.equal(this, root);
+      assert.equal(args.length, 0);
+      requests++;
+    };
+    page.pointer('start', 'pointerup', 1, 10, 10);
+    page.click('start', { pointerType: undefined });
+    assert.equal(page.dom.body.dataset.touch, 'true');
+    assert.equal(requests, 1);
+    page.dom.webkitCurrentFullScreenElement = root;
+    page.resize(390, 790, { bottom: 34 }, 'webkitfullscreenchange');
+    page.step(90);
+    assert.equal(page.dom.body.dataset.mode, 'ended');
+    page.click('restart', { sourceCapabilities: { firesTouchEvents: true } });
+    assert.equal(page.dom.body.dataset.mode, 'running');
+    assert.equal(requests, 1);
+  }
+});
+
+test('standalone, an existing fullscreen, a denied request, and absent APIs all preserve play', async () => {
+  for (const [options, configure, expectedRequests] of [
+    [{ standalone: true }, () => {}, 0],
+    [{ appleStandalone: true }, () => {}, 0],
+    [{}, (page) => { page.dom.fullscreenElement = page.ids.game; }, 0],
+    [{}, (page) => { page.dom.fullscreenEnabled = false; }, 0],
+    [{}, (page) => { delete page.ids.game.requestFullscreen; }, 0],
+    [{}, () => {}, 1],
+  ]) {
+    const page = browserHarness('landing', options);
+    let requests = 0;
+    page.ids.game.requestFullscreen = () => {
+      requests++;
+      throw new Error('Platform denied fullscreen');
+    };
+    configure(page);
+    page.click('start', { pointerType: 'touch' });
+    page.step(4);
+    assert.equal(page.dom.body.dataset.mode, 'running');
+    assert.ok(page.runner.distance > 0);
+    assert.equal(requests, expectedRequests);
+  }
+
+  const page = browserHarness('hurdle');
+  let requests = 0;
+  page.ids.game.requestFullscreen = () => {
+    requests++;
+    return Promise.reject(new Error('Platform denied fullscreen'));
+  };
+  page.ids.game.webkitRequestFullscreen = () => assert.fail('Rejection must not attempt another native request');
+  page.click('start', { pointerType: 'touch' });
+  page.step(90);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(page.dom.body.dataset.mode, 'ended');
+  assert.equal(requests, 1);
+  page.click('restart', { pointerType: 'touch' });
+  assert.equal(page.dom.body.dataset.mode, 'running');
+  assert.equal(requests, 2);
+});
+
+test('home-screen assets prefer fullscreen, fall back to standalone, and resolve under a subdirectory', () => {
+  const read = (file) => readFileSync(join(__dirname, '..', file));
+  const html = read('index.html').toString();
+  const manifest = JSON.parse(read('manifest.webmanifest'));
+  const url = new URL('https://example.com/runner/manifest.webmanifest');
+  const expectedScope = 'https://example.com/runner/';
+  assert.equal(new URL(manifest.scope, url).href, expectedScope);
+  assert.equal(new URL(manifest.start_url, url).href, `${expectedScope}index.html`);
+  assert.equal(manifest.id, undefined);
+  assert.deepEqual(manifest.display_override, ['fullscreen', 'standalone']);
+  assert.equal(manifest.display, 'standalone');
+  assert.match(html, /rel="manifest" href="manifest\.webmanifest"/);
+  assert.match(html, /name="apple-mobile-web-app-capable" content="yes"/);
+  assert.match(html, /name="apple-mobile-web-app-status-bar-style" content="black-translucent"/);
+  const apple = html.match(/rel="apple-touch-icon" sizes="(\d+x\d+)" href="([^"]+)"/);
+  assert.ok(apple);
+  assert.equal(apple[1], '180x180');
+  assert.deepEqual(manifest.icons.map(({ sizes }) => sizes), ['192x192', '512x512']);
+  for (const { src, sizes } of [...manifest.icons, { src: apple[2], sizes: apple[1] }]) {
+    const icon = read(src);
+    assert.equal(icon.subarray(0, 8).toString('hex'), '89504e470d0a1a0a');
+    assert.equal(icon.subarray(12, 16).toString(), 'IHDR');
+    assert.equal(`${icon.readUInt32BE(16)}x${icon.readUInt32BE(20)}`, sizes);
+  }
+});
+
+test('iPhone Install shows the Safari steps and traps keyboard focus without starting the run', () => {
+  const page = browserHarness('landing', { userAgent: 'Mozilla/5.0 (iPhone) AppleWebKit Safari', touch: true });
+  const trigger = page.ids.install;
+  const guide = page.ids['install-guide'];
+  const done = page.ids['install-done'];
+  assert.equal(trigger.hidden, false);
+  trigger.focus();
+  assert.equal(page.key('keydown', 'Enter', false, { target: trigger }), false);
+  page.click('install');
+  assert.equal(guide.getAttribute('open'), '');
+  assert.equal(page.ids['install-apple-steps'].hidden, false);
+  assert.equal(page.ids['install-browser-steps'].hidden, true);
+  assert.equal(page.ids['install-host-note'].hidden, true);
+  assert.equal(page.dom.activeElement, done);
+  assert.equal(page.key('keydown', 'Tab', false, { shiftKey: true }), true);
+  assert.equal(page.dom.activeElement, done);
+  page.key('keydown', 'Enter');
+  page.click('start');
+  assert.equal(page.dom.body.dataset.mode, 'ready');
+
+  page.resize(667, 320, { left: 44, bottom: 21 });
+  assert.equal(guide.getAttribute('open'), '');
+  assert.equal(page.key('keydown', 'Escape'), true);
+  assert.equal(guide.getAttribute('open'), null);
+  assert.equal(page.dom.activeElement, trigger);
+  assert.equal(page.key('keydown', 'Space', false, { target: trigger }), false);
+  page.click('install');
+  page.click('install-done');
+  assert.equal(page.dom.activeElement, trigger);
+  assert.equal(page.dom.body.dataset.mode, 'ready');
+  page.click('start', { pointerType: 'touch' });
+  assert.equal(trigger.hidden, true);
+});
+
+test('manual help is platform-specific and the fallback dialog can be dismissed', () => {
+  const page = browserHarness('landing', { userAgent: 'Mobile Firefox Android', touch: true, protocol: 'file:' });
+  const guide = page.ids['install-guide'];
+  guide.showModal = undefined;
+  guide.close = undefined;
+  page.click('install');
+  assert.equal(guide.getAttribute('open'), '');
+  assert.equal(page.classes['.intro'].inert, true);
+  assert.equal(page.ids['install-apple-steps'].hidden, true);
+  assert.equal(page.ids['install-browser-steps'].hidden, false);
+  assert.equal(page.ids['install-host-note'].hidden, false);
+  page.click('install-guide', { target: page.ids['install-title'] });
+  assert.equal(guide.getAttribute('open'), '');
+  page.click('install-guide', { target: guide });
+  assert.equal(guide.getAttribute('open'), null);
+  assert.equal(page.classes['.intro'].inert, false);
+  assert.equal(page.dom.activeElement, page.ids.install);
+  assert.equal(page.dom.body.dataset.mode, 'ready');
+
+  const ipad = browserHarness('landing', { platform: 'MacIntel', maxTouchPoints: 5 });
+  ipad.click('install');
+  assert.equal(ipad.ids['install-apple-steps'].hidden, false);
+});
+
+test('native install uses a captured offer synchronously, consumes it, and handles cancellation and a fresh offer', async () => {
+  const page = browserHarness('landing');
+  const trigger = page.ids.install;
+  assert.equal(trigger.hidden, true);
+  let called = 0;
+  let onClickStack = false;
+  let finishChoice;
+  const offer = {
+    prompt() {
+      assert.ok(onClickStack);
+      assert.equal(this, offer);
+      called++;
+      return Promise.resolve();
+    },
+    userChoice: new Promise((resolve) => { finishChoice = resolve; }),
+    preventDefault() { this.prevented = true; },
+  };
+  page.windowEvent('beforeinstallprompt', offer);
+  assert.equal(offer.prevented, true);
+  assert.equal(trigger.hidden, false);
+  trigger.focus();
+  onClickStack = true;
+  page.click('install');
+  onClickStack = false;
+  assert.equal(called, 1);
+  assert.equal(trigger.getAttribute('aria-disabled'), 'true');
+  page.key('keydown', 'Enter');
+  page.click('start');
+  page.click('install');
+  assert.equal(called, 1);
+  assert.equal(page.dom.body.dataset.mode, 'ready');
+  finishChoice({ outcome: 'dismissed' });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(trigger.getAttribute('aria-disabled'), 'false');
+  assert.equal(page.dom.activeElement, trigger);
+  page.click('install');
+  assert.equal(called, 1);
+  assert.equal(page.ids['install-browser-steps'].hidden, false);
+  page.click('install-done');
+
+  page.windowEvent('beforeinstallprompt', { preventDefault() {}, prompt() { called++; return { outcome: 'accepted' }; } });
+  page.click('install');
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(called, 2);
+  assert.equal(trigger.hidden, true);
+  assert.equal(page.dom.activeElement, page.ids.start);
+  assert.equal(page.dom.body.dataset.mode, 'ready');
+});
+
+test('install visibility follows appinstalled, standalone, confirmed installs, and game mode', async () => {
+  for (const mode of [{ standalone: true }, { appleStandalone: true }]) {
+    const page = browserHarness('landing', { ...mode, touch: true, userAgent: 'iPhone Safari' });
+    page.windowEvent('beforeinstallprompt', { preventDefault() {}, prompt() { assert.fail('Standalone must not prompt'); } });
+    assert.equal(page.ids.install.hidden, true);
+  }
+  const storage = new Map();
+  const page = browserHarness('hurdle', { userAgent: 'iPhone Safari', touch: true, storage });
+  page.click('install');
+  page.windowEvent('appinstalled');
+  assert.equal(page.ids['install-guide'].getAttribute('open'), null);
+  assert.equal(page.ids.install.hidden, true);
+  assert.equal(page.dom.activeElement, page.ids.start);
+
+  const reload = browserHarness('hurdle', { touch: true, storage });
+  assert.equal(reload.ids.install.hidden, true);
+  reload.windowEvent('beforeinstallprompt', { preventDefault() {}, prompt() { return Promise.reject(new Error('denied')); } });
+  assert.equal(reload.ids.install.hidden, false);
+  reload.click('install');
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(reload.ids['install-guide'].getAttribute('open'), '');
+  reload.click('install-done');
+  reload.click('start');
+  reload.windowEvent('beforeinstallprompt', { preventDefault() {}, prompt() { assert.fail('No prompt during play'); } });
+  assert.equal(reload.ids.install.hidden, true);
+  reload.step(90);
+  assert.equal(reload.dom.body.dataset.mode, 'ended');
+  assert.equal(reload.ids.install.hidden, true);
+});
 
 test('page wiring renders a frame and rejects held Space, then accepts a fresh touchdown tap', () => {
   const game = browserHarness('landing');
@@ -502,6 +963,7 @@ test('center and exterior closures expose deep walls and an empty deck before an
   let stars = 0;
   const ctx = { beginPath() {}, arc() { stars++; }, fill() {}, fillRect() {} };
   const renderer = Object.assign(Object.create(Scene.prototype), { cameraBack: 10.8, ctx });
+  renderer.setViewDistance(MIN_VIEW_DISTANCE);
   const flats = [];
   const boxes = [];
   const faces = [];
@@ -877,29 +1339,42 @@ test('actual acceleration, dash, and landing boost move the FOV smoothly and wit
   };
   const baseline = focal();
   const midway = advance(9);
-  const atCap = advance(9.5);
-  assert.ok(midway / baseline > 0.90 && midway / baseline < 0.92);
-  assert.equal(run.speed, 64);
-  assert.ok(Math.abs(atCap / baseline - 0.82) < 0.001);
+  const at65 = advance(9.5);
+  const settledAt = (speed) => baseline * (0.68 + 0.32 * 36 / (36 + speed - START_SPEED));
+  assert.ok(midway / baseline > 0.89 && midway / baseline < 0.92);
+  assert.ok(run.speed > 65);
+  assert.ok(Math.abs(at65 - settledAt(run.speed)) < baseline * 0.002);
 
   run.dash();
   const firstDashFrame = advance(STEP);
   const dash = advance(0.2);
-  assert.ok(atCap - firstDashFrame < baseline * 0.01);
-  assert.ok(dash < atCap - baseline * 0.035);
-  assert.ok(Math.abs(advance(1.6) - atCap) < baseline * 0.004);
+  assert.ok(at65 - firstDashFrame < baseline * 0.01);
+  assert.ok(dash < at65 - baseline * 0.025);
+  const afterDash = advance(1.6);
+  assert.ok(Math.abs(afterDash - settledAt(run.speed)) < baseline * 0.004);
 
   run.jumpOrTap();
   while (!run.tapOpen) advance(STEP);
   run.jumpOrTap();
   while (!run.boosting) advance(STEP);
-  assert.ok(advance(0.24) < atCap - baseline * 0.03);
+  const boost = advance(0.24);
+  assert.ok(boost < settledAt(run.baseSpeed) - baseline * 0.02);
   run.dash();
   const both = advance(0.22);
-  assert.ok(both / baseline > 0.70 && both / baseline < 0.75);
-  assert.ok(Math.abs(advance(1.6) - atCap) < baseline * 0.005);
-  view.updateSpeed({ speed: 900, baseSpeed: 64 }, 10, 'running');
-  assert.ok(Math.abs(focal() / baseline - 0.70) < 0.0001);
+  assert.ok(both < boost - baseline * 0.01);
+  const afterBoth = advance(1.6);
+  assert.ok(Math.abs(afterBoth - settledAt(run.speed)) < baseline * 0.005);
+  const focalAt = (speed) => {
+    view.updateSpeed({ speed, baseSpeed: speed }, 10, 'running');
+    return focal();
+  };
+  const at101 = focalAt(101);
+  const at140 = focalAt(140);
+  const at572 = focalAt(572);
+  assert.ok(at140 < at101 - baseline * 0.02);
+  assert.ok(at572 < at140 - baseline * 0.05);
+  assert.ok(at572 / baseline > 0.68);
+  assert.ok(Math.abs(focalAt(1_000_000) / baseline - 0.68) < 0.0001);
 });
 
 test('speed framing preserves readable outer lanes, and reduced motion and restart reset the lens', () => {
@@ -917,19 +1392,20 @@ test('speed framing preserves readable outer lanes, and reduced motion and resta
     scene.reset(32);
     scene.frameCamera(runner);
     const resting = scene.focal;
-    for (const speed of [32, 64, 101]) {
-      scene.updateSpeed({ baseSpeed: 64, speed }, 10, 'running');
+    for (const speed of [32, 64, 101, 572, 100_000]) {
+      runner.baseSpeed = runner.speed = speed;
+      scene.updateSpeed(runner, 10, 'running');
       scene.frameCamera(runner);
       const xs = [-6.45, -5, -2.5, 0, 2.5, 5, 6.45].map((x) => scene.screenPoint(scene.viewPoint([x, 0, -1]))[0]);
       assert.ok(xs[0] >= (safe.left ?? 0) && xs.at(-1) <= width - (safe.right ?? 0));
       assert.ok(xs[2] - xs[1] >= 40, 'Outer lanes remain readable at the widest setting');
     }
-    assert.ok(Math.abs(scene.focal / resting - (compact ? 0.76 : 0.70)) < 0.0001);
+    assert.ok(Math.abs(scene.focal / resting - (compact ? 0.744 : 0.68)) < 0.001);
   }
 
   runner.distance = 1179;
   runner.x = 0;
-  runner.baseSpeed = 64;
+  runner.baseSpeed = 572;
   game.step(5);
   assert.equal(game.dom.body.dataset.mode, 'ended');
   game.ids.restart.events.click();
@@ -943,6 +1419,200 @@ test('speed framing preserves readable outer lanes, and reduced motion and resta
   const resting = reduced.scene.focal;
   reduced.key('keydown', 'KeyW');
   reduced.step(18);
-  assert.ok(reduced.runner.speed > MAX_SPEED);
+  assert.ok(reduced.runner.speed > FAST_START_SPEED + 7);
   assert.equal(reduced.scene.focal, resting);
+  reduced.changeReducedMotion(false);
+  reduced.step(8);
+  assert.ok(reduced.scene.focal < resting);
+  reduced.changeReducedMotion(true);
+  reduced.step(1);
+  assert.equal(reduced.scene.focal, resting);
+});
+
+test('rendering keeps a readable reaction horizon, exact cut lip, and bounded work at high speed', () => {
+  const game = browserHarness('landing');
+  game.step(1);
+  const view = game.scene;
+  const inputs = [
+    [320, 568, { top: 45, bottom: 25 }], [667, 280, { left: 44, bottom: 21 }], [1440, 900, {}],
+  ];
+  const observed = {};
+  for (const name of ['hurdle', 'cutLip', 'trackTile', 'spikes', 'face']) {
+    const original = view[name];
+    view[name] = function (...args) {
+      if (name === 'hurdle' || name === 'cutLip') observed[name].push(args[1]);
+      else observed[name]++;
+      return original.apply(this, args);
+    };
+  }
+
+  for (const [width, height, safe] of inputs) {
+    game.resize(width, height, safe);
+    for (const speed of [32, 140, 572, 1500, 10_000]) {
+      const run = new Run({ scenario: 'landing' });
+      run.distance = 90_000;
+      run.baseSpeed = run.speed = speed;
+      const reaction = (speed + MAX_EXTRA_SPEED) * REACTION_TIME + 1;
+      const far = run.viewDistance * 0.80;
+      const gapStart = run.distance - speed * 2;
+      const gapEnd = run.addClosure(gapStart, 2, run.distance + reaction - gapStart);
+      run.addSpikes(run.distance + speed * 0.35, 0, 2, 1);
+      run.addObstacle(run.distance + reaction, 1, 'hurdle');
+      run.addObstacle(run.distance + far, 1, 'hurdle');
+      const gap = run.obstacles.find((obstacle) => obstacle.type === 'gap');
+      const realReaction = gapEnd - run.distance;
+      assert.equal(gap.end, gapEnd);
+      view.reset(speed);
+      view.openingBlend = 0;
+      Object.assign(observed, { hurdle: [], cutLip: [], trackTile: 0, spikes: 0, face: 0 });
+      view.draw(run, 1, 1 / 60, 'running');
+
+      assert.ok(observed.hurdle.some((z) => Math.abs(z - far) < 1e-7));
+      assert.ok(observed.hurdle.includes(realReaction));
+      assert.deepEqual(observed.cutLip, [realReaction]);
+      assert.equal(observed.spikes, 1);
+      assert.ok(observed.trackTile <= 45);
+      assert.ok(observed.face <= 1300);
+      assert.equal(view.projectedDepth(0), 0);
+      assert.ok(view.projectedDepth(realReaction) < view.projectedDepth(far));
+
+      const project = (point) => view.screenPoint(view.viewPoint(point));
+      const x = laneX(1);
+      const [, bottom] = project([x, 0, realReaction - 0.25]);
+      const [, top] = project([x, 0.71, realReaction - 0.25]);
+      const [left] = project([x - 0.96, 0.5, realReaction - 0.25]);
+      const [right] = project([x + 0.96, 0.5, realReaction - 0.25]);
+      if (speed >= 140) {
+        assert.ok(bottom - top >= 2.6, `${width}x${height} ${speed} m/s hurdle is ${bottom - top}px tall`);
+        assert.ok(right - left >= 8, `${width}x${height} ${speed} m/s hurdle is ${right - left}px wide`);
+      }
+    }
+  }
+});
+
+test('equal display-frame advances grow through the high-speed approach to contact', () => {
+  const page = browserHarness('high-speed');
+  page.resize(1280, 720, {});
+  page.step(1);
+  const { scene, runner } = page;
+  assert.equal(runner.speed, 572);
+  scene.openingBlend = 0;
+  scene.frameCamera(runner);
+  const foot = (seconds) => scene.screenPoint(scene.viewPoint([0, 0, runner.speed * seconds]))[1];
+  const advances = [0.5, 0.2, 0.12, 0.05].map((seconds) => foot(seconds - 1 / 60) - foot(seconds));
+  assert.ok(advances.every((advance, index) => index === 0 || advance > advances[index - 1]),
+    `1/60 s screen advances at .5, .2, .12, .05 s to contact: ${advances.map((pixels) => pixels.toFixed(2)).join(', ')} px`);
+});
+
+test('fixed longitudinal gaps use one scale across the runner, boosts, and deck detail transitions', () => {
+  const page = browserHarness('high-speed');
+  page.step(1);
+  const { scene, runner } = page;
+  const points = [-210, -140, -70, 0, 70, 140, 210];
+  const depths = () => points.map((z) => scene.viewPoint([0, 0, z])[2]);
+  const initial = depths();
+  const spacing = initial[1] - initial[0];
+  assert.ok(initial.slice(1).every((z, index) => Math.abs(z - initial[index] - spacing) < 1e-9));
+  for (const extra of [15, 22, 37]) {
+    runner.speed = runner.baseSpeed + extra;
+    scene.updateSpeed(runner, 1 / 60, 'running');
+    scene.frameCamera(runner);
+    assert.deepEqual(depths(), initial);
+  }
+
+  const layers = new Map();
+  scene.trackTile = () => {};
+  scene.trackMarks = (_distance, _gaps, _start, _end, stride, opacity) => layers.set(stride, opacity);
+  const sample = (distance) => {
+    scene.setViewDistance(distance);
+    layers.clear();
+    scene.track({ distance: 0, lane: 2, obstacles: [] }, false);
+    return new Map(layers);
+  };
+  // Find the two sides of one grid step, so the test does not depend on its absolute distance.
+  let lower = 190;
+  let upper = 2000;
+  const initialStride = sample(lower).keys().next().value;
+  while (upper - lower > 1e-4) {
+    const middle = (lower + upper) / 2;
+    if (sample(middle).keys().next().value === initialStride) lower = middle;
+    else upper = middle;
+  }
+  const before = sample(lower);
+  const depthBefore = scene.projectedDepth(70);
+  const after = sample(upper);
+  assert.ok(before.get(initialStride * 2) > 0.999);
+  assert.ok(after.get(initialStride * 2) > 0.999);
+  assert.ok(Math.abs(scene.projectedDepth(70) - depthBefore) < 0.001);
+});
+
+test('the rear view retains the floor, closure lip, passed hurdles and spike tiles with bounded work', () => {
+  const page = browserHarness('high-speed');
+  page.resize(1280, 720, {});
+  page.step(1);
+  const { scene } = page;
+  const drawn = { flats: [], hurdles: [], lips: [], tiles: [] };
+  for (const [name, field] of [['flat', 'flats'], ['hurdle', 'hurdles'], ['cutLip', 'lips'], ['trackTile', 'tiles']]) {
+    const original = scene[name];
+    scene[name] = function (...args) {
+      drawn[field].push(args);
+      return original.apply(this, args);
+    };
+  }
+  for (const speed of [572, 1500, 10_000]) {
+    Object.values(drawn).forEach((calls) => { calls.length = 0; });
+    const run = new Run({ scenario: 'landing' });
+    run.baseSpeed = run.speed = speed;
+    run.distance = 90_000;
+    scene.reset(speed);
+    scene.openingBlend = 0;
+    scene.frameCamera(run);
+    const rear = scene.rearViewDistance;
+    const closureEnd = run.distance - rear * 0.16;
+    const spikeEnd = run.distance - rear * 0.11;
+    const old = run.distance - run.viewDistance * 0.2;
+    run.addObstacle(old, 4, 'hurdle');
+    run.addClosure(run.distance - rear * 1.1, 2, closureEnd - (run.distance - rear * 1.1));
+    run.addObstacle(run.distance - rear * 0.65, 1, 'spikes', {
+      end: spikeEnd, tiles: 2, tileLength: rear * 0.27, lanes: 1,
+    });
+    const justPassed = run.distance - rear * 0.22;
+    run.addObstacle(justPassed, 3, 'hurdle');
+    run.tick();
+    assert.ok(run.obstacles.find((obstacle) => obstacle.z === justPassed));
+    scene.draw(run, 1, 1 / 60, 'running');
+
+    const backStart = Math.min(...drawn.tiles.map(([, , , start]) => start));
+    assert.ok(Math.abs(backStart - (run.distance - scene.rearViewDistance)) < 1e-7);
+    assert.ok(drawn.tiles.length <= 38);
+    assert.ok(drawn.flats.length <= 850);
+    assert.deepEqual(drawn.lips.map(([, z]) => z), [closureEnd - run.distance]);
+    assert.deepEqual(drawn.hurdles.map(([, z]) => z), [justPassed - run.distance]);
+    assert.ok(drawn.flats.some(([, , near, far, color]) => color === '#6d223b' && near < far && far < 0));
+
+    const occupied = (x, z) => drawn.flats.some(([left, right, near, far, , y]) =>
+      (y === undefined || y === 0) && left < x && x < right && near < z && z < far);
+    const beforeLip = closureEnd - run.distance - rear * 0.07;
+    const afterLip = closureEnd - run.distance + rear * 0.07;
+    assert.equal(occupied(0, beforeLip), false);
+    assert.equal(occupied(laneX(1), beforeLip), true);
+    assert.equal(occupied(0, afterLip), true);
+
+    const project = (z) => scene.screenPoint(scene.viewPoint([0, 0, z]))[1];
+    assert.ok(project(justPassed - run.distance) > project(0));
+    assert.ok(project(justPassed - run.distance) < scene.height);
+  }
+});
+
+test('a delayed browser frame still sweeps a hurdle the runner reaches late in that frame', () => {
+  const game = browserHarness('landing');
+  game.ids.start.events.click();
+  game.step(1);
+  game.runner.speed = game.runner.baseSpeed = 572;
+  game.runner.addObstacle(74, 2, 'hurdle');
+  game.delayFrame(150);
+  game.step(1);
+  assert.equal(game.dom.body.dataset.mode, 'ended');
+  assert.equal(game.runner.crash.type, 'hurdle');
+  assert.ok(game.runner.distance > 73 && game.runner.distance < 74);
 });

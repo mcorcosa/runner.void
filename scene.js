@@ -1,10 +1,12 @@
 (function () {
   'use strict';
 
-  const { LANE_WIDTH, LANE_COUNT, START_SPEED, MAX_SPEED, MAX_EXTRA_SPEED, SPIKE_HEIGHT, laneX, obstacles } = globalThis.VoidRunner;
+  const { LANE_WIDTH, LANE_COUNT, START_SPEED, MIN_VIEW_DISTANCE, SPIKE_HEIGHT, laneX, obstacles } = globalThis.VoidRunner;
   const ROAD_HALF = LANE_WIDTH * LANE_COUNT / 2;
   const TILE = 6;
-  const TRACK_VIEW = 186;
+  const FAR_TILES = 36;
+  const MARKING_TILES = 24;
+  const OBSTACLE_VIEW_FRACTION = 0.9;
   const CUT_DEPTH = 2.15;
   const NEAR = 1.3;
   const PITCH = 0.207;
@@ -23,9 +25,18 @@
   }
 
   function speedWidening(speed) {
-    const base = Math.max(0, Math.min(1, (speed - START_SPEED) / (MAX_SPEED - START_SPEED)));
-    const surge = Math.max(0, Math.min(1, (speed - MAX_SPEED) / MAX_EXTRA_SPEED));
-    return base * 0.18 + surge * 0.12;
+    const extra = Math.max(0, speed - START_SPEED);
+    return 0.32 * (1 - 36 / (36 + extra));
+  }
+
+  function levelOfDetail(distance, spacing, count) {
+    return Math.max(1, 2 ** Math.ceil(Math.log2(distance / (spacing * count))));
+  }
+
+  function deckSurfaces(missing) {
+    if (missing < 0) return [[-ROAD_HALF, ROAD_HALF]];
+    const x = laneX(missing);
+    return [[-ROAD_HALF, x - LANE_WIDTH / 2], [x + LANE_WIDTH / 2, ROAD_HALF]];
   }
 
   function clip(points) {
@@ -58,6 +69,7 @@
       });
       this.openingBlend = 1;
       this.particles = [];
+      this.setViewDistance(MIN_VIEW_DISTANCE);
       this.speedLines = Array.from({ length: 36 }, (_, index) => {
         const angle = (repeatable(index * 5 + 471) - 0.5) * 2.3;
         return {
@@ -128,9 +140,25 @@
       }
     }
 
+    setViewDistance(distance) {
+      this.viewDistance = distance;
+      // One scale for the whole scene leaves equal world gaps equal in camera space.
+      const ratio = MIN_VIEW_DISTANCE / distance;
+      const projectedRange = 82 + (MIN_VIEW_DISTANCE - 82) * ratio ** 1.8;
+      this.longitudinalScale = projectedRange / distance;
+    }
+
+    projectedDepth(z) {
+      return z * this.longitudinalScale;
+    }
+
+    get rearViewDistance() {
+      return this.cameraBack / this.longitudinalScale;
+    }
+
     viewPoint([x, y, z]) {
       const dy = y - this.cameraY;
-      const dz = z + this.cameraBack;
+      const dz = this.projectedDepth(z) + this.cameraBack;
       return [x - this.cameraX, dy * COS + dz * SIN, dz * COS - dy * SIN];
     }
 
@@ -249,9 +277,9 @@
 
     deepVoid(distance) {
       const { ctx, width, height } = this;
-      const stride = 23;
+      const stride = 23 * levelOfDetail(this.viewDistance, 23, 9);
       const first = Math.floor((distance + 14) / stride);
-      const last = Math.ceil((distance + TRACK_VIEW + 46) / stride);
+      const last = Math.ceil((distance + this.viewDistance * 1.24) / stride);
       for (let band = last; band >= first; band--) {
         for (let detail = 0; detail < 13; detail++) {
           const index = band * 107 + detail * 7;
@@ -259,7 +287,8 @@
           const y = -5.4 - repeatable(index + 1) ** 1.45 * 29;
           const z = band * stride + repeatable(index + 2) * stride - distance;
           const brightness = repeatable(index + 3);
-          const fade = Math.max(0, Math.min(1, (232 - z) / 130, (z - 4) / 16));
+          const depth = this.projectedDepth(z);
+          const fade = Math.max(0, Math.min(1, (232 - depth) / 130, (depth - 4) / 16));
           if (fade <= 0) continue;
           if (detail < 2) {
             ctx.globalAlpha = fade * (0.57 + brightness * 0.35);
@@ -297,44 +326,35 @@
     }
 
     track(run, ready) {
-      const start = Math.floor((run.distance - this.cameraBack) / TILE);
-      const end = Math.ceil((run.distance + TRACK_VIEW) / TILE);
-      const gaps = run.obstacles.filter((obstacle) => obstacle.type === 'gap');
-      for (let tile = end; tile >= start; tile--) {
-        const z = tile * TILE;
-        const near = z - run.distance;
-        const far = near + TILE;
-        const dust = Math.min(1, Math.max(0.22, (210 - near) / 145));
-        this.ctx.globalAlpha = dust;
-        const support = tile % 3 === 0 ? near + TILE / 2 : null;
-        const selected = ready ? -1 : run.lane;
-        // Course rows have enough separation for only one closure to intersect a tile.
-        const gap = gaps.find((obstacle) => obstacle.z < z + TILE && obstacle.end > z);
-        if (gap) {
-          const entry = Math.max(near, gap.z - run.distance);
-          const resume = Math.min(far, gap.end - run.distance);
-          this.deckSection(resume, far, tile, selected, -1, support);
-          if (gap.end <= z + TILE && resume <= TRACK_VIEW) {
-            this.ctx.globalAlpha = Math.max(0.48, dust);
-            this.cutLip(laneX(gap.lane), resume);
-            this.ctx.globalAlpha = dust;
-          }
-          this.deckSection(entry, resume, tile, selected, gap.lane, support);
-          this.deckSection(near, entry, tile, selected, -1, support);
-        } else {
-          this.deckSection(near, far, tile, selected, -1, support);
-        }
+      const { distance } = run;
+      const farEnd = distance + this.viewDistance;
+      const nearStart = distance - this.rearViewDistance;
+      const length = farEnd - nearStart;
+      const stride = TILE * levelOfDetail(length, TILE, FAR_TILES);
+      const gaps = run.obstacles.filter(({ type, z, end }) => type === 'gap' && z < farEnd && end > nearStart);
+      const selected = ready ? -1 : run.lane;
+      for (let tile = Math.ceil(farEnd / stride) - 1; (tile + 1) * stride > nearStart; tile--) {
+        const z = tile * stride;
+        this.trackTile(distance, gaps, selected, Math.max(nearStart, z), Math.min(farEnd, z + stride));
       }
+
+      // Markings crossfade between world-anchored grids while the solid deck keeps its exact boundaries.
+      const detail = Math.max(0, Math.log2(length / (TILE * MARKING_TILES)));
+      const markStride = TILE * 2 ** Math.floor(detail);
+      const blend = detail % 1;
+      this.trackMarks(distance, gaps, nearStart, farEnd, markStride, 1 - blend);
+      if (blend > 0) this.trackMarks(distance, gaps, nearStart, farEnd, markStride * 2, blend);
+
       for (const gap of gaps) {
         const x = laneX(gap.lane);
-        const entry = gap.z - run.distance;
-        const resume = gap.end - run.distance;
-        if (entry >= -this.cameraBack && entry <= TRACK_VIEW) {
-          this.ctx.globalAlpha = Math.min(1, (210 - entry) / 130);
+        const entry = gap.z - distance;
+        const resume = gap.end - distance;
+        if (entry >= -this.rearViewDistance && entry <= this.viewDistance) {
+          this.ctx.globalAlpha = Math.min(1, (210 - this.projectedDepth(entry)) / 130);
           this.flat(x - 1.17, x + 1.17, entry - 0.8, entry, '#dfb557', 0.034);
         }
-        if (resume >= -this.cameraBack && resume + 1.52 <= TRACK_VIEW) {
-          this.ctx.globalAlpha = Math.max(0.48, Math.min(1, (210 - resume) / 130));
+        if (resume >= -this.rearViewDistance && resume + 1.52 <= this.viewDistance) {
+          this.ctx.globalAlpha = Math.max(0.48, Math.min(1, (210 - this.projectedDepth(resume)) / 130));
           this.flat(x - 1.19, x + 1.19, resume, resume + 0.58, '#59a3ab', 0.034);
           for (const offset of [-0.78, 0, 0.78]) {
             this.flat(x + offset - 0.20, x + offset + 0.20, resume + 0.62, resume + 1.52, '#99edf0', 0.034);
@@ -344,47 +364,98 @@
       this.ctx.globalAlpha = 1;
     }
 
-    deckSection(near, far, tile, selected, missing, support = null) {
+    trackTile(distance, gaps, selected, start, end) {
+      const near = start - distance;
+      const far = end - distance;
+      const dust = Math.min(1, Math.max(0.22, (210 - this.projectedDepth(near)) / 145));
+      this.ctx.globalAlpha = dust;
+      // Work in world coordinates at the cut, irrespective of the section's level of detail.
+      const gap = gaps.find((obstacle) => obstacle.z < end && obstacle.end > start);
+      if (!gap) {
+        this.deckSection(near, far, selected, -1);
+        return;
+      }
+
+      const entry = Math.max(near, gap.z - distance);
+      const resume = Math.min(far, gap.end - distance);
+      this.deckSection(resume, far, selected, -1);
+      if (gap.end <= end) {
+        this.ctx.globalAlpha = Math.max(0.48, dust);
+        this.cutLip(laneX(gap.lane), resume);
+        this.ctx.globalAlpha = dust;
+      }
+      this.deckSection(entry, resume, selected, gap.lane);
+      this.deckSection(near, entry, selected, -1);
+    }
+
+    trackMarks(distance, gaps, start, end, stride, opacity) {
+      const scale = stride / TILE;
+      const first = Math.floor(start / stride);
+      const last = Math.ceil(end / stride) - 1;
+      for (let tile = last; tile >= first; tile--) {
+        const z = tile * stride;
+        const near = z - distance;
+        const gap = gaps.find((cut) => cut.z < z + stride && cut.end > z);
+        const missing = gap?.lane ?? -1;
+        this.ctx.globalAlpha = opacity * Math.min(1, Math.max(0.22, (210 - this.projectedDepth(near)) / 145));
+        if (z >= start) {
+          for (const [left, right] of deckSurfaces(missing)) {
+            if (left < right) this.flat(left, right, near, Math.min(end - distance, near + .09 * scale), '#130f20', .018);
+          }
+        }
+        const markerStart = Math.max(start - distance, near + 1.05 * scale);
+        const markerEnd = Math.min(end - distance, near + 2.1 * scale);
+        if (markerStart >= markerEnd) continue;
+        for (let lane = 1; lane < LANE_COUNT; lane++) {
+          if (lane === missing || lane - 1 === missing) continue;
+          const edge = -ROAD_HALF + lane * LANE_WIDTH;
+          this.flat(edge - 0.018, edge + 0.018, markerStart, markerEnd, '#9b77c7', 0.023);
+        }
+        for (const side of [-1, 1]) {
+          if (missing === (side < 0 ? 0 : LANE_COUNT - 1)) continue;
+          const edge = side * ROAD_HALF;
+          this.flat(edge - 0.064, edge + 0.064, markerStart, markerEnd, '#dfbcff', 0.037);
+        }
+        if (gap) {
+          const braceNear = Math.max(start - distance, gap.z - distance, near + 3.65 * scale);
+          const braceFar = Math.min(end - distance, gap.end - distance, near + 4.25 * scale);
+          if (braceFar <= braceNear) continue;
+          const left = laneX(missing) - LANE_WIDTH / 2;
+          const right = left + LANE_WIDTH;
+          if (missing > 0 && this.cameraX > left) this.cutBrace(left, braceNear, braceFar);
+          if (missing < LANE_COUNT - 1 && this.cameraX < right) this.cutBrace(right, braceNear, braceFar);
+        }
+      }
+    }
+
+    deckSection(near, far, selected, missing) {
       if (far <= near) return;
       const half = LANE_WIDTH / 2;
       const cut = laneX(missing);
-      const surfaces = missing === -1 ? [[-ROAD_HALF, ROAD_HALF]] :
-        [[-ROAD_HALF, cut - half], [cut + half, ROAD_HALF]];
       if (missing > 0) this.cutWall(cut - half, near, far);
       if (missing >= 0 && missing < LANE_COUNT - 1) this.cutWall(cut + half, near, far);
-      for (const [left, right] of surfaces) {
+      for (const [left, right] of deckSurfaces(missing)) {
         if (right <= left) continue;
-        if (support !== null && support - 0.42 >= near && support + 0.42 <= far) {
-          this.box((left + right) / 2, -0.73, support, right - left, 0.47, 0.84, ['#201630', '#1a1128', '#462e68']);
-        }
-        this.flat(left, right, near, far, tile % 2 ? '#231a36' : '#271c3a');
-        this.flat(left, right, near, Math.min(far, near + 0.065), '#151022', 0.018);
+        this.flat(left, right, near, far, '#261b38');
       }
       if (missing > 0) this.flat(cut - half - 0.16, cut - half, near, far, '#929ec1', 0.025);
       if (missing >= 0 && missing < LANE_COUNT - 1) {
         this.flat(cut + half, cut + half + 0.16, near, far, '#929ec1', 0.025);
       }
-      if (selected >= 0 && selected !== missing && far - near > 0.13) {
+      if (selected >= 0 && selected !== missing) {
         const x = laneX(selected);
-        this.flat(x - half + 0.045, x + half - 0.045, near + 0.065, far - 0.065,
-          tile % 2 ? '#302248' : '#302344', 0.012);
+        this.flat(x - half + 0.045, x + half - 0.045, near, far, '#302248', 0.012);
       }
       for (let lane = 1; lane < LANE_COUNT; lane++) {
         if (lane === missing || lane - 1 === missing) continue;
         const edge = -ROAD_HALF + lane * LANE_WIDTH;
         this.flat(edge - 0.025, edge + 0.025, near, far, '#61477d', 0.019);
-        if (far - near > 1.05) {
-          this.flat(edge - 0.018, edge + 0.018, near + 1.05, Math.min(far, near + 2.1), '#9b77c7', 0.023);
-        }
       }
       for (const side of [-1, 1]) {
         if (missing === (side < 0 ? 0 : LANE_COUNT - 1)) continue;
         const edge = side * ROAD_HALF;
         this.flat(edge - 0.20, edge + 0.20, near, far, '#583888', 0.025);
         this.flat(edge - 0.037, edge + 0.037, near, far, '#a77cf9', 0.032);
-        if (far - near > 0.32) {
-          this.flat(edge - 0.064, edge + 0.064, near + 0.32, Math.min(far, near + 1.23), '#dfbcff', 0.037);
-        }
       }
     }
 
@@ -392,12 +463,14 @@
       this.face([[x, 0, near], [x, 0, far], [x, -CUT_DEPTH, far], [x, -CUT_DEPTH, near]], '#202b43');
       this.face([[x, 0, near], [x, 0, far], [x, -0.27, far], [x, -0.27, near]], '#6b7396');
       this.face([[x, -1.07, near], [x, -1.07, far], [x, -1.21, far], [x, -1.21, near]], '#455370');
-      if (far - near < 1.7) return;
-      const brace = near + Math.min(1.7, (far - near) * 0.44);
-      this.face([[x, -0.27, brace - 0.32], [x, -0.27, brace + 0.42],
-        [x, -CUT_DEPTH, brace + 0.19], [x, -CUT_DEPTH, brace - 0.19]], '#49546f');
-      this.face([[x, -0.29, brace - 0.32], [x, -0.29, brace - 0.23],
-        [x, -CUT_DEPTH, brace - 0.13], [x, -CUT_DEPTH, brace - 0.19]], '#8793b2');
+    }
+
+    cutBrace(x, near, far) {
+      const lean = (far - near) * 0.20;
+      this.face([[x, -0.27, near], [x, -0.27, far],
+        [x, -CUT_DEPTH, far - lean], [x, -CUT_DEPTH, near + lean]], '#49546f');
+      this.face([[x, -0.29, near], [x, -0.29, near + lean],
+        [x, -CUT_DEPTH, near + 1.6 * lean], [x, -CUT_DEPTH, near + lean]], '#8793b2');
     }
 
     cutLip(x, z) {
@@ -455,18 +528,24 @@
     spikes(patch, distance) {
       const left = laneX(patch.lane) - LANE_WIDTH / 2 + 0.1;
       const right = left + LANE_WIDTH * patch.lanes - 0.2;
+      const limit = this.viewDistance * OBSTACLE_VIEW_FRACTION;
       for (let tile = patch.tiles - 1; tile >= 0; tile--) {
         const start = patch.z - distance + tile * patch.tileLength;
         const end = start + patch.tileLength;
-        if (end < -this.cameraBack || start > 165) continue;
-        this.ctx.globalAlpha = Math.min(1, (195 - start) / 100);
-        this.flat(left, right, start, end, '#6d223b', 0.027);
-        this.flat(left + 0.08, right - 0.08, start + 0.7, end - 0.30, '#3e142c', 0.03);
-        this.flat(left, right, start, start + 0.48, '#ff6b8f', 0.034);
-        this.flat(left, right, end - 0.22, end, '#b54260', 0.034);
+        if (end < -this.rearViewDistance || start > limit) continue;
+        this.ctx.globalAlpha = Math.min(1, (195 - this.projectedDepth(start)) / 100);
+        const nearEdge = Math.max(start, -this.rearViewDistance);
+        const farEdge = Math.min(end, this.viewDistance);
+        this.flat(left, right, nearEdge, farEdge, '#6d223b', 0.027);
+        const plateStart = Math.max(start + 0.7, nearEdge);
+        const plateEnd = Math.min(end - 0.30, farEdge);
+        if (plateStart < plateEnd) this.flat(left + 0.08, right - 0.08, plateStart, plateEnd, '#3e142c', 0.03);
+        if (start >= -this.rearViewDistance) this.line([[left, 0.034, start], [right, 0.034, start]], '#ff7597', 1.6);
+        if (end <= this.viewDistance) this.flat(left, right, end - 0.22, end, '#b54260', 0.034);
         for (let row = 5; row >= 0; row--) {
-          const depth = patch.tileLength * 0.125;
+          const depth = Math.min(3.5, patch.tileLength * 0.125);
           const near = start + patch.tileLength * (0.07 + row * 0.15);
+          if (near + depth < -this.rearViewDistance || near + depth > this.viewDistance) continue;
           for (let tooth = 0; tooth < patch.lanes * 2; tooth++) {
             const x = left + (tooth + 0.5) * (right - left) / (patch.lanes * 2);
             const point = [x, SPIKE_HEIGHT, near + depth * 0.55];
@@ -554,12 +633,12 @@
       const desired = speedWidening(mode === 'ended' ? START_SPEED : run.speed);
       const response = desired > this.widening ? 0.14 : 0.32;
       this.widening = mode === 'ready' ? desired : desired + (this.widening - desired) * Math.exp(-dt / response);
-      const baseRush = (run.baseSpeed - START_SPEED) / (MAX_SPEED - START_SPEED) * 0.28;
+      const baseRush = speedWidening(run.baseSpeed);
       const boostRush = (run.boosting ? 0.72 : 0) + (run.dashing ? 1 : 0);
       const target = mode === 'running' ? Math.min(1, baseRush + boostRush) : 0;
       this.rush = target + (this.rush - target) * Math.exp(-dt * (target > this.rush ? 15 : 9));
       this.speedPulse *= Math.exp(-dt * 5.5);
-      this.speedTravel += dt * (0.55 + run.speed * 0.032);
+      this.speedTravel += dt * (0.55 + 4.4 * (1 - 110 / (110 + run.speed)));
     }
 
     drawSpeed(run) {
@@ -640,19 +719,21 @@
 
     frameCamera(run) {
       const { width, height } = this;
+      this.setViewDistance(run.viewDistance);
       const [left, top, right, bottom] = this.insets;
       const usableWidth = Math.max(1, width - left - right);
       const usableHeight = Math.max(1, height - top - bottom);
       const short = width > height && usableHeight <= 500;
       const compact = short || usableWidth <= 760 || usableWidth < usableHeight;
-      this.cameraBack = 10.8;
+      // Keep world z = -1 at its original camera depth while the rest of the scene scales.
+      this.cameraBack = 9.8 + this.longitudinalScale;
       this.cameraY = 5.35;
       this.centerX = left + usableWidth * (compact ? 0.5 : 0.5 + 0.185 * this.openingBlend);
       this.centerY = top + usableHeight * (short ? 0.47 : compact ? 0.54 : 0.56);
-      const heightLimit = usableHeight * (short ? 0.88 : 1.12);
+      const heightLimit = usableHeight * (short ? 0.90 : 1.12);
       const baseFocal = Math.min(usableWidth * 0.8, heightLimit);
       // Limit lateral follow at the nearest playable rails, using the narrowest field of view.
-      const railDepth = (this.cameraBack - 1) * COS + this.cameraY * SIN;
+      const railDepth = (this.cameraBack + this.projectedDepth(-1)) * COS + this.cameraY * SIN;
       const followLimit = Math.max(0, (usableWidth / 2 - 4) * railDepth / baseFocal - (ROAD_HALF + 0.2));
       const follow = Math.max(-followLimit, Math.min(followLimit, run.x * 0.22));
       this.cameraX = compact ? 0 : -1.18 * this.openingBlend + follow;
@@ -673,8 +754,9 @@
       for (const obstacle of run.obstacles) {
         if (obstacle.type === 'spikes') this.spikes(obstacle, run.distance);
       }
+      const obstacleView = this.viewDistance * OBSTACLE_VIEW_FRACTION;
       const visible = run.obstacles.filter((obstacle) => obstacles[obstacle.type] &&
-        obstacle.z - run.distance >= -3 && obstacle.z - run.distance < 165);
+        obstacle.z - run.distance >= -this.rearViewDistance && obstacle.z - run.distance < obstacleView);
       let playerDrawn = false;
       for (const obstacle of visible.reverse()) {
         const z = obstacle.z - run.distance;
@@ -682,7 +764,7 @@
           this.player(run, time, ready, dashing);
           playerDrawn = true;
         }
-        this.ctx.globalAlpha = Math.min(1, (185 - z) / 112);
+        this.ctx.globalAlpha = Math.min(1, (185 - this.projectedDepth(z)) / 112);
         const x = laneX(obstacle.lane);
         const halfWidth = obstacles[obstacle.type].halfWidth;
         if (halfWidth) this.flat(x - halfWidth - 0.11, x + halfWidth + 0.11, z - 0.63, z + 0.54, '#130b20b5', .028);

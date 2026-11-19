@@ -4,7 +4,13 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#090711">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Void Runner">
   <title>Void Runner</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="apple-touch-icon" sizes="180x180" href="icons/apple-touch-icon.png">
+  <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
   <link rel="stylesheet" href="style.css">
   <script src="game.js" defer></script>
   <script src="scene.js" defer></script>
@@ -36,8 +42,74 @@
       <h1 id="game-title">VOID<br><span>RUNNER</span></h1>
       <p>Jump hurdles and short spike patches. Dash midair over long spikes. Change lanes before yellow roadblocks.</p>
       <p class="touch-instructions">Swipe sideways to move. Swipe up to jump, then again at landing for a boost. Tap Dash with either finger.</p>
-      <div class="actions"><button id="start" type="button">Start run</button><span class="shortcut">or press <kbd>Enter</kbd></span></div>
+      <div class="actions">
+        <button id="start" type="button">Start run</button>
+        <button id="install" class="install-trigger" type="button" aria-haspopup="dialog" hidden>Install</button>
+        <span class="shortcut">or press <kbd>Enter</kbd></span>
+      </div>
     </section>
+
+    <dialog id="install-guide" class="install-guide" aria-labelledby="install-title" aria-modal="true">
+      <div class="install-panel">
+        <h2 id="install-title">Install Void Runner</h2>
+        <p id="install-host-note" hidden>Open the hosted game in your browser first.</p>
+        <ol id="install-apple-steps" class="install-steps" role="list" hidden>
+          <li>
+            <div class="install-picture" aria-hidden="true">
+              <svg viewBox="0 0 152 60" width="152" height="60">
+                <rect x="7" y="12" width="138" height="36" rx="18" fill="#362a4d"/>
+                <rect x="60" y="14" width="38" height="32" rx="12" fill="#c9a6ff"/>
+                <path d="m28 24-6 6 6 6" fill="none" stroke="#f5ebff" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+                <path d="M76 29h-5v12h16V29h-5m-3 6V19m-4 4 4-4 4 4" fill="none" stroke="#170e25" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+                <g fill="#f5ebff">
+                  <circle cx="111" cy="30" r="1.7"/><circle cx="117" cy="30" r="1.7"/><circle cx="123" cy="30" r="1.7"/>
+                </g>
+              </svg>
+            </div>
+            <div><strong>Tap Share</strong><small>Safari’s Page Menu if needed.</small></div>
+          </li>
+          <li>
+            <div class="install-picture" aria-hidden="true">
+              <svg viewBox="0 0 152 60" width="152" height="60">
+                <rect x="4" y="7" width="144" height="46" rx="10" fill="#362a4d"/>
+                <path d="M63 13h26" stroke="#8e7da4" stroke-width="2" stroke-linecap="round"/>
+                <rect x="9" y="19" width="134" height="28" rx="6" fill="#c9a6ff"/>
+                <g fill="none" stroke="#170e25" stroke-width="1.3">
+                  <rect x="16" y="26" width="14" height="14" rx="3"/>
+                  <path d="M23 29v8m-4-4h8"/>
+                </g>
+                <text x="36" y="37" fill="#170e25" font-size="10" font-weight="700">Add to Home Screen</text>
+              </svg>
+            </div>
+            <div><strong>Add to Home Screen</strong><small>Scroll down to find it.</small></div>
+          </li>
+          <li>
+            <div class="install-picture" aria-hidden="true">
+              <svg viewBox="0 0 152 60" width="152" height="60">
+                <rect x="4" y="5" width="144" height="50" rx="10" fill="#362a4d"/>
+                <text x="13" y="22" fill="#f5ebff" font-size="8.5" font-weight="700">Add to Home Screen</text>
+                <rect x="110" y="9" width="33" height="19" rx="7" fill="#c9a6ff"/>
+                <text x="126.5" y="22" text-anchor="middle" fill="#170e25" font-size="11" font-weight="700">Add</text>
+                <path d="M13 31h126" stroke="#66577c"/>
+                <text x="13" y="46" fill="#f5ebff" font-size="10.5">Open as Web App</text>
+                <rect x="109" y="36" width="28" height="15" rx="7.5" fill="#298257"/>
+                <circle cx="129.5" cy="43.5" r="5.6" fill="#fff"/>
+              </svg>
+            </div>
+            <div><strong>Tap Add</strong><small>Enable Open as Web App first, if shown.</small></div>
+          </li>
+          <li>
+            <div class="install-picture install-home" aria-hidden="true">
+              <img src="icons/apple-touch-icon.png" width="32" height="32" alt="">
+              <span>Void Runner</span>
+            </div>
+            <div><strong>Launch Void Runner</strong><small>From the Home Screen.</small></div>
+          </li>
+        </ol>
+        <p id="install-browser-steps" hidden>Open your browser’s menu and look for <strong>Install app</strong> or <strong>Add to Home Screen</strong>. Availability depends on the browser.</p>
+        <button id="install-done" type="button" autofocus>Done</button>
+      </div>
+    </dialog>
 
     <section class="results" aria-labelledby="result-title" hidden>
       <div class="result-card">

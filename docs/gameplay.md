@@ -17,10 +17,19 @@ The owner approved the first-playable scope below, including all three proposed 
 
 The PM verified both orientations, mid-run rotation, and clearing a long spike patch with a second-finger dash in Edge touch emulation.
 
+## Mobile fullscreen and Home Screen launch
+
+- Tapping **Start run** or **Run again** requests native fullscreen for the complete game, including the HUD and touch controls, on supporting browsers. If fullscreen is unavailable or denied, the run starts in the browser viewport.
+- Rotating the device preserves the active run. If you exit fullscreen manually, the current run continues in the browser viewport and fullscreen stays off for the rest of that run.
+- For Home Screen launches, the manifest prefers fullscreen and falls back to standalone. Browsers without support for `display_override` use the `display` setting of `standalone`.
+
+The PM verified fullscreen on touch start and restart, rotation, manual exit, and rejected-request fallback in Edge mobile emulation.
+
 ## Speed, camera, and late-run hazards
 
-- Base speed starts at 32 m/s and gains 1.8 m/s each second until it reaches 64 m/s.
+- In normal play, base speed starts at 32 m/s and increases by 1.8 m/s every second throughout the active run, with no designed ceiling. Landing boosts and dashes temporarily add to base speed. Restarting resets speed to 32 m/s.
 - The camera’s field of view widens as actual running speed rises, including during landing boosts and dashes, and eases back as the runner slows. Reduced motion disables speed-based widening.
+- At each speed, obstacles, track, and lane gaps share the same forward scale in the camera view. Collisions use world distances in meters.
 - During an active forward dash, the first cracked barrier the runner physically contacts shatters. Each dash can break one barrier. A **Dash active** badge appears during the dash, and blue edge streaks appear when reduced motion is off.
 - Later in the run, spike patches can span two adjacent lanes and extend two tiles along the track. To cross a two-tile patch, jump and then dash in midair.
 - In endless runs, a lane can close for several seconds of travel. The deck is missing from the roadblock to the reopened floor, exposing the cut edges of the remaining deck. Move over before the roadblock and reenter only once you reach the far lip where the floor resumes. Entering the gap early ends the run, even during a jump or dash.

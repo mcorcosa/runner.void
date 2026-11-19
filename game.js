@@ -4,8 +4,10 @@
   const LANE_COUNT = 5;
   const LANE_WIDTH = 2.5;
   const START_SPEED = 32;
-  const MAX_SPEED = 64;
+  const FAST_START_SPEED = 64;
+  const HIGH_SPEED_QA = 572;
   const ACCELERATION = 1.8;
+  const STEP = 1 / 120;
   const GRAVITY = 23;
   const JUMP_SPEED = 9.8;
   const TAP_EARLY = 0.13;
@@ -23,18 +25,14 @@
   const SPIKE_CLEAR_TIME = 2 * Math.sqrt(JUMP_SPEED ** 2 - 2 * GRAVITY * SPIKE_HEIGHT) / GRAVITY;
   const SPIKE_DESCENT_TIME = (JUMP_SPEED / GRAVITY) + SPIKE_CLEAR_TIME / 2;
   const GROUND_DASH_AIR_TRAVEL = DASH_SPEED * DASH_TIME * (2 / 3) * GROUND_DASH_AIR_SPEED;
-  const MAX_SPIKE_SPAN = 2 * Math.ceil((SPIKE_CLEAR_TIME * (MAX_SPEED + BOOST_SPEED) + GROUND_DASH_AIR_TRAVEL) / 2);
   const SPIKES_INTRO = 360;
   const CLOSURES_INTRO = 670;
   const MAX_EXTRA_SPEED = BOOST_SPEED + DASH_SPEED;
   const CLOSURE_SECONDS = 3;
-  const CLOSURE_VARIATION = 0.5;
-  const MAX_CLOSURE_LENGTH = Math.ceil((MAX_SPEED + MAX_EXTRA_SPEED) * (CLOSURE_SECONDS + CLOSURE_VARIATION));
+  const MIN_VIEW_DISTANCE = 186;
+  const VIEW_SECONDS = 2.6;
   const REACTION_TIME = 0.86;
   const ROW_BUFFER = 3;
-  const ROW_VARIATION = 8;
-  const MAX_ROW_GAP = Math.ceil((MAX_SPEED + MAX_EXTRA_SPEED) * REACTION_TIME) + ROW_BUFFER + ROW_VARIATION - 1;
-  const STEP = 1 / 120;
   const LANES = Array.from({ length: LANE_COUNT }, (_, lane) => lane);
 
   const obstacles = {
@@ -54,11 +52,21 @@
     gap: [[66, 2, 'gap', 320]],
     'gap-edge': [[67, 0, 'gap', 323]],
     camera: [[1180, 2, 'barrier']],
+    'high-speed': [[620, 2, 'hurdle'], [1240, 0, 'gap', 2000], [2350, 2, 'barrier'], [3920, 1, 'spikes', 2, 2]],
     landing: [],
   };
 
   function laneX(lane) {
     return (lane - 2) * LANE_WIDTH;
+  }
+
+  function forwardEnvelope(speed, seconds) {
+    // The step-sized term covers forward integration at the end of a tick.
+    return seconds * (speed + ACCELERATION * (seconds / 2 + STEP));
+  }
+
+  function sightDistance(baseSpeed) {
+    return Math.max(MIN_VIEW_DISTANCE, forwardEnvelope(baseSpeed + MAX_EXTRA_SPEED, VIEW_SECONDS));
   }
 
   function randomFor(seed) {
@@ -127,7 +135,9 @@
       this.scripted = Object.hasOwn(scenarios, scenario);
       this.distance = 0;
       this.time = 0;
-      this.baseSpeed = this.scripted && pace === 'fast' ? MAX_SPEED : START_SPEED;
+      this.baseSpeed = START_SPEED;
+      if (this.scripted && pace === 'fast') this.baseSpeed = FAST_START_SPEED;
+      else if (scenario === 'high-speed') this.baseSpeed = HIGH_SPEED_QA;
       this.speed = this.baseSpeed;
       this.lane = 2;
       this.x = 0;
@@ -167,13 +177,17 @@
     }
 
     upperBaseAt(z) {
-      return Math.min(MAX_SPEED, Math.sqrt(this.baseSpeed ** 2 + 2 * ACCELERATION * (z - this.distance)));
+      return Math.sqrt(this.baseSpeed ** 2 + 2 * ACCELERATION * Math.max(0, z - this.distance));
+    }
+
+    get viewDistance() {
+      return sightDistance(this.baseSpeed);
     }
 
     addSpikes(z, lane, tiles, lanes) {
       // Two tiles exceed the normal jump's maximum travel, including a landing boost and ground-dash carry.
-      const upperSpeed = this.upperBaseAt(z + MAX_SPIKE_SPAN) + BOOST_SPEED;
-      const tileLength = Math.ceil((SPIKE_CLEAR_TIME * upperSpeed + GROUND_DASH_AIR_TRAVEL) / 2);
+      const upperSpeed = this.upperBaseAt(z) + BOOST_SPEED;
+      const tileLength = Math.ceil((forwardEnvelope(upperSpeed, SPIKE_CLEAR_TIME) + GROUND_DASH_AIR_TRAVEL) / 2);
       const end = z + tileLength * tiles;
       this.addObstacle(z, lane, 'spikes', { tiles, lanes, tileLength, end });
       return end;
@@ -186,18 +200,24 @@
     }
 
     rowClearance(z) {
-      return Math.ceil((this.upperBaseAt(z) + MAX_EXTRA_SPEED) * REACTION_TIME) + ROW_BUFFER;
+      return Math.ceil(forwardEnvelope(this.upperBaseAt(z) + MAX_EXTRA_SPEED, REACTION_TIME)) + ROW_BUFFER;
+    }
+
+    distanceIn(z, seconds) {
+      return Math.ceil(forwardEnvelope(this.upperBaseAt(z) + MAX_EXTRA_SPEED, seconds));
     }
 
     populate() {
       if (this.scripted) return;
-      while (this.lastHazardEnd < this.distance + 170) {
-        const gap = this.rowClearance(this.lastHazardEnd + MAX_ROW_GAP);
-        const z = this.lastHazardEnd + gap + Math.floor(this.random() * ROW_VARIATION);
+      while (this.lastHazardEnd < this.distance + this.viewDistance) {
+        const previousEnd = this.lastHazardEnd;
+        const gap = this.rowClearance(previousEnd);
+        const variation = Math.floor(this.random() * (this.upperBaseAt(previousEnd) + MAX_EXTRA_SPEED) * 0.08);
+        const z = previousEnd + gap + variation;
 
         if (this.closure) {
           const { lane, throughLane, end } = this.closure;
-          if (end - z >= this.rowClearance(end)) {
+          if (end - z >= this.rowClearance(z)) {
             this.lastHazardEnd = z;
             this.addStandardRow(z, lane, throughLane);
           } else {
@@ -221,17 +241,16 @@
           if (lane !== undefined) {
             this.openLanes = LANES.filter((next) => next < lane || next >= lane + width);
             if (closure) {
-              const seconds = CLOSURE_SECONDS + this.random() * CLOSURE_VARIATION;
-              const speed = this.upperBaseAt(z + MAX_CLOSURE_LENGTH) + MAX_EXTRA_SPEED;
-              const end = this.addClosure(z, lane, Math.ceil(speed * seconds));
+              const seconds = CLOSURE_SECONDS + this.random() * 0.5;
+              const end = this.addClosure(z, lane, this.distanceIn(z, seconds));
               const neighbors = this.openLanes.filter((next) => Math.abs(next - lane) === 1);
               const throughLane = neighbors[Math.floor(this.random() * neighbors.length)];
               this.closure = { lane, throughLane, end };
-              this.nextClosure = end + 360 + this.random() * 180;
+              this.nextClosure = end + this.distanceIn(end, 3.55 + this.random() * 1.8);
             } else {
               const tiles = introduced && this.random() < 0.7 ? 2 : 1;
               this.lastHazardEnd = this.addSpikes(z, lane, tiles, width);
-              this.nextSpikes = this.lastHazardEnd + 110 + this.random() * 150;
+              this.nextSpikes = this.lastHazardEnd + this.distanceIn(this.lastHazardEnd, 1.1 + this.random() * 1.5);
             }
             continue;
           }
@@ -328,7 +347,7 @@
       if (this.crash) return;
       const startTime = this.time;
       this.time += STEP;
-      this.baseSpeed = Math.min(MAX_SPEED, this.baseSpeed + ACCELERATION * STEP);
+      this.baseSpeed += ACCELERATION * STEP;
       const boost = this.boosting ? BOOST_SPEED : 0;
       const dash = this.dashing ? DASH_SPEED * Math.sqrt((this.dashUntil - this.time) / DASH_TIME) : 0;
       const airCarry = this.airborne && !this.airDashUntil ? GROUND_DASH_AIR_SPEED : 1;
@@ -387,15 +406,16 @@
         this.queuedTap = false;
       }
       const oldest = this.obstacles[0];
-      if ((oldest?.end ?? oldest?.z) < this.distance - 12) {
-        this.obstacles = this.obstacles.filter((obstacle) => (obstacle.end ?? obstacle.z) >= this.distance - 12);
+      const rearLimit = this.distance - this.viewDistance * 0.15;
+      if ((oldest?.end ?? oldest?.z) < rearLimit) {
+        this.obstacles = this.obstacles.filter((obstacle) => (obstacle.end ?? obstacle.z) >= rearLimit);
       }
       this.populate();
     }
   }
 
-  const api = { Run, STEP, LANE_WIDTH, LANE_COUNT, START_SPEED, MAX_SPEED, MAX_EXTRA_SPEED, REACTION_TIME,
-    SPIKE_HEIGHT, laneX, obstacles };
+  const api = { Run, STEP, LANE_WIDTH, LANE_COUNT, START_SPEED, FAST_START_SPEED, MAX_EXTRA_SPEED, REACTION_TIME,
+    MIN_VIEW_DISTANCE, VIEW_SECONDS, SPIKE_HEIGHT, laneX, obstacles };
   if (typeof module !== 'undefined') module.exports = api;
   else globalThis.VoidRunner = api;
 })();

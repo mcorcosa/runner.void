@@ -6,6 +6,9 @@
   const TILE = 6;
   const FAR_TILES = 36;
   const MARKING_TILES = 24;
+  const REFLECTOR_SPACING = 10;
+  const REFLECTOR_CADENCE = 5.5;
+  const PACE_LINES = 16;
   const OBSTACLE_VIEW_FRACTION = 0.9;
   const CUT_DEPTH = 2.15;
   const NEAR = 1.3;
@@ -18,6 +21,7 @@
   const suit = ['#63558c', '#252036', '#3f345a'];
   const amber = ['#ffd18b', '#a65a3a', '#d58b53'];
   const pink = ['#e49aff', '#823c9c', '#a65ac1'];
+  const railMount = ['#dec6fb', '#594373', '#3d2e55'];
 
   function repeatable(index) {
     const value = Math.sin(index * 19.829 + 4.51) * 43758.5453;
@@ -27,6 +31,10 @@
   function speedWidening(speed) {
     const extra = Math.max(0, speed - START_SPEED);
     return 0.32 * (1 - 36 / (36 + extra));
+  }
+
+  function runningPace(speed) {
+    return speed / (speed + 68);
   }
 
   function levelOfDetail(distance, spacing, count) {
@@ -108,7 +116,9 @@
       this.particles.length = 0;
       this.speedPulse = 0;
       this.speedTravel = 0;
-      this.rush = 0;
+      this.boostRush = 0;
+      this.pace = this.reduceMotion ? 0 : runningPace(speed);
+      this.stridePhase = 0;
       this.widening = this.reduceMotion ? 0 : speedWidening(speed);
     }
 
@@ -344,6 +354,7 @@
       const blend = detail % 1;
       this.trackMarks(distance, gaps, nearStart, farEnd, markStride, 1 - blend);
       if (blend > 0) this.trackMarks(distance, gaps, nearStart, farEnd, markStride * 2, blend);
+      if (!this.reduceMotion) this.railReflectors(run, gaps, nearStart, farEnd);
 
       for (const gap of gaps) {
         const x = laneX(gap.lane);
@@ -359,6 +370,47 @@
           for (const offset of [-0.78, 0, 0.78]) {
             this.flat(x + offset - 0.20, x + offset + 0.20, resume + 0.62, resume + 1.52, '#99edf0', 0.034);
           }
+        }
+      }
+      this.ctx.globalAlpha = 1;
+    }
+
+    railReflectors(run, gaps, nearStart, farEnd) {
+      const { distance, baseSpeed } = run;
+      const scale = this.longitudinalScale;
+      // Fade every other mount before doubling the spacing, leaving the remaining mounts in place.
+      const detail = Math.max(0, Math.log2(baseSpeed / (REFLECTOR_SPACING * REFLECTOR_CADENCE)));
+      const level = Math.floor(detail);
+      const stride = REFLECTOR_SPACING * 2 ** level;
+      const fineOpacity = 1 - (detail - level);
+      const first = Math.ceil(Math.max(nearStart, distance - 8 / scale) / stride);
+      const last = Math.floor(Math.min(farEnd, distance + 57 / scale) / stride);
+      const halfDepth = 0.46 / scale;
+      const trailLength = (0.45 + 6 * this.pace ** 2) / scale;
+      const leftCuts = gaps.filter((gap) => gap.lane === 0);
+      const rightCuts = gaps.filter((gap) => gap.lane === LANE_COUNT - 1);
+      for (let index = last; index >= first; index--) {
+        const anchor = index * stride;
+        const z = anchor - distance;
+        const depth = this.projectedDepth(z);
+        const opacity = Math.min(1, (57 - depth) / 30, (depth + 8) / 3) * (index % 2 ? fineOpacity : 1);
+        if (opacity <= 0) continue;
+        const trailStart = anchor + halfDepth;
+        for (const side of [-1, 1]) {
+          const cuts = side < 0 ? leftCuts : rightCuts;
+          let trailEnd = Math.min(farEnd, trailStart + trailLength);
+          for (const gap of cuts) {
+            if (gap.end > anchor - halfDepth) trailEnd = Math.min(trailEnd, gap.z);
+          }
+          if (trailEnd < trailStart) continue;
+          const x = side * (ROAD_HALF + 0.09);
+          if (trailEnd > trailStart) {
+            this.ctx.globalAlpha = opacity * (0.38 + this.pace * 0.48);
+            this.face([[x - 0.14, 0.044, trailStart - distance], [x + 0.14, 0.044, trailStart - distance],
+              [x, 0.044, trailEnd - distance]], '#bc8df4');
+          }
+          this.ctx.globalAlpha = opacity;
+          this.box(x, 0.025, z, 0.34, 0.49, halfDepth * 2, railMount);
         }
       }
       this.ctx.globalAlpha = 1;
@@ -562,7 +614,7 @@
       const x = run.x;
       const lift = run.height;
       const sliding = run.sliding;
-      const stride = this.reduceMotion || run.airborne || ready || sliding ? 0 : Math.sin(run.time * 14);
+      const stride = this.reduceMotion || run.airborne || ready || sliding ? 0 : Math.sin(this.stridePhase);
       const bob = this.reduceMotion || run.airborne || sliding ? 0 : ready ? Math.sin(time * 1.9) * 0.035 : Math.abs(stride) * 0.055;
       const y = lift + bob;
       const landingCue = run.slideWindowOpen || (run.boosting && !dashing);
@@ -659,20 +711,51 @@
       const desired = speedWidening(mode === 'ended' ? START_SPEED : run.speed);
       const response = desired > this.widening ? 0.14 : 0.32;
       this.widening = mode === 'ready' ? desired : desired + (this.widening - desired) * Math.exp(-dt / response);
-      const baseRush = speedWidening(run.baseSpeed);
-      const boostRush = (run.boosting ? 0.72 : 0) + (run.dashing ? 1 : 0);
-      const target = mode === 'running' ? Math.min(1, baseRush + boostRush) : 0;
-      this.rush = target + (this.rush - target) * Math.exp(-dt * (target > this.rush ? 15 : 9));
+      if (mode !== 'running') return;
+      const pace = runningPace(run.speed) * (run.braking ? 0.52 : 1);
+      const decay = Math.exp(-dt * 10);
+      // Integrate the same eased pace used by the reflectors so footfall timing survives frame gaps.
+      const paceTravel = pace * dt + (this.pace - pace) * (1 - decay) / 10;
+      this.stridePhase = (this.stridePhase + 10 * dt + 12 * paceTravel) % (Math.PI * 2);
+      this.pace = pace + (this.pace - pace) * decay;
+      const target = run.boosting ? 0.72 : 0;
+      this.boostRush = target + (this.boostRush - target) * Math.exp(-dt * (target > this.boostRush ? 15 : 9));
       this.speedPulse *= Math.exp(-dt * 5.5);
       this.speedTravel += dt * (0.55 + 4.4 * (1 - 110 / (110 + run.speed)));
     }
 
-    drawSpeed(run) {
-      const intensity = Math.min(1, this.rush + this.speedPulse * 0.40);
-      if (intensity < 0.03) return;
+    drawPace(intensity) {
+      if (intensity < 0.01) return;
       const { ctx, width, height, centerX, horizon } = this;
-      const tint = run.boosting ? '112, 255, 212' : '191, 135, 255';
-      const core = run.boosting ? '226, 255, 247' : '245, 226, 255';
+      const [left, , right] = this.insets;
+      const gutter = Math.min((width - left - right) * 0.16, height * 0.26);
+      if (gutter <= 0) return;
+      const length = gutter * (0.08 + 0.56 * this.pace ** 2);
+      ctx.strokeStyle = '#c9a3f4';
+      ctx.lineWidth = 0.72 + 0.76 * this.pace;
+      for (let index = 0; index < PACE_LINES; index++) {
+        const line = this.speedLines[index];
+        const side = Math.sign(line.x);
+        const edge = side < 0 ? left : width - right;
+        const phase = (line.offset + this.speedTravel * 0.5 * line.pace) % 1;
+        const inset = gutter * (1 - phase);
+        const x = edge - side * inset;
+        const y = horizon + height * (0.29 + line.y * 0.27) * (0.68 + 0.32 * phase);
+        const dx = Math.min(inset, length * line.size);
+        const dy = dx * (y - horizon) / Math.max(1, Math.abs(x - centerX));
+        ctx.globalAlpha = intensity * line.size * Math.min(1, phase * 6, (1 - phase) * 5);
+        ctx.beginPath();
+        ctx.moveTo(x, y);
+        ctx.lineTo(x + side * dx, y + dy);
+        ctx.stroke();
+      }
+      ctx.globalAlpha = 1;
+    }
+
+    drawBoost(intensity) {
+      const { ctx, width, height, centerX, horizon } = this;
+      const tint = '112, 255, 212';
+      const core = '226, 255, 247';
       const originY = horizon + height * 0.07;
       const edge = ctx.createRadialGradient(centerX, originY, Math.min(width, height) * 0.31,
         centerX, originY, Math.hypot(width * 0.54, height * 0.65));
@@ -771,7 +854,8 @@
       const ready = mode === 'ready';
       const dashing = mode === 'running' && run.dashing;
       this.updateSpeed(run, dt, mode);
-      this.openingBlend = ready ? 1 : this.openingBlend * Math.exp(-dt * 8);
+      if (ready || this.reduceMotion) this.openingBlend = ready ? 1 : 0;
+      else this.openingBlend *= Math.exp(-dt * 8);
       this.frameCamera(run);
 
       this.sky(this.reduceMotion ? 0 : time);
@@ -801,7 +885,12 @@
       this.drawParticles(dt, run.distance);
       if (mode === 'running' && !this.reduceMotion) {
         if (dashing) this.drawDash();
-        else this.drawSpeed(run);
+        else {
+          const boost = Math.min(1, this.boostRush + this.speedPulse * 0.40);
+          const pace = (0.065 + 0.44 * this.pace ** 1.4) * Math.max(0, 1 - boost * 5);
+          this.drawPace(pace);
+          if (boost >= 0.03) this.drawBoost(boost);
+        }
       }
     }
   }

@@ -384,7 +384,69 @@ test('closures stop a dash at the start edge, catch lateral entry, and allow ree
   }
 });
 
-test('seeded courses keep a reachable route and late-game density across full closure spans', () => {
+test('distance gates introduce hazards and increase lane coverage even when rows are prefetched', () => {
+  class PrefetchedRun extends Run {
+    get viewDistance() { return 9000; }
+  }
+
+  const sample = new PrefetchedRun({ seed: 187 });
+  assert.equal(sample.distance, 0);
+  assert.deepEqual(sample.obstacles, new PrefetchedRun({ seed: 187 }).obstacles);
+  assert.notDeepEqual(sample.obstacles, new PrefetchedRun({ seed: 188 }).obstacles);
+
+  const stages = Array.from({ length: 3 }, () => ({
+    standard: [], interior: [], combinedSpikes: [],
+  }));
+  for (let seed = 1; seed <= 24; seed++) {
+    const { obstacles } = new PrefetchedRun({ seed });
+    const [hurdle, barrier] = obstacles;
+    assert.deepEqual([hurdle, barrier].map(({ type, lane, z }) => [type, lane, z]), [
+      ['hurdle', 2, 78], ['barrier', 2, 165],
+    ]);
+    const introductions = obstacles.filter(({ type }) => type === 'spikes' || type === 'gap').slice(0, 4);
+    assert.deepEqual(introductions.map(({ type, tiles, lanes, lane }) => [type, tiles, lanes, lane]), [
+      ['spikes', 1, 1, 2], ['spikes', 2, 1, 2], ['spikes', 1, 2, 2], ['gap', undefined, undefined, 2],
+    ]);
+    const gates = [360, 640, 900, 1200, 1800];
+    const rows = new Map();
+    for (const obstacle of obstacles) {
+      if (obstacle.z >= 9000) break;
+      if (!rows.has(obstacle.z)) rows.set(obstacle.z, []);
+      rows.get(obstacle.z).push(obstacle);
+    }
+    for (const [index, intro] of introductions.entries()) {
+      assert.ok(intro.z >= gates[index] && intro.z < gates[index + 1],
+        `Seed ${seed} introduces ${intro.type} at ${intro.z} m`);
+      assert.deepEqual(rows.get(intro.z).map(({ type }) => type),
+        intro.type === 'gap' ? ['roadblock', 'gap'] : ['spikes']);
+    }
+
+    let closedUntil = 0;
+    for (const [z, row] of rows) {
+      const stage = stages[z < 1800 ? 0 : z < 3600 ? 1 : 2];
+      const gap = row.find(({ type }) => type === 'gap');
+      const spike = row.find(({ type }) => type === 'spikes');
+      if (gap) closedUntil = gap.end;
+      else if (spike) stage.combinedSpikes.push(Number(spike.tiles === 2 && spike.lanes === 2));
+      else if (z < closedUntil) stage.interior.push(row.length);
+      else stage.standard.push(row.length);
+    }
+  }
+
+  const average = (rows) => rows.reduce((sum, value) => sum + value, 0) / rows.length;
+  const [early, middle, late] = stages;
+  assert.ok(early.standard.every((count) => count === 1));
+  assert.ok(early.interior.every((count) => count === 1));
+  assert.ok(early.combinedSpikes.every((combined) => !combined));
+  assert.ok(average(middle.standard) >= 2);
+  assert.ok(average(late.standard) > average(middle.standard) + 0.3);
+  assert.ok(average(middle.interior) > 1);
+  assert.ok(average(late.interior) > average(middle.interior) + 0.2);
+  assert.ok(average(middle.combinedSpikes) > 0.1);
+  assert.ok(average(late.combinedSpikes) > average(middle.combinedSpikes) + 0.1);
+});
+
+test('seeded courses keep one-move reachability and reaction time across full closure spans', () => {
   for (let seed = 1; seed <= 24; seed++) {
     const run = new Run({ seed });
     assert.equal(run.speed, START_SPEED);
@@ -606,6 +668,7 @@ function browserHarness(scenario, {
   });
   dom.body.dataset.mode = 'ready';
   let draws = 0;
+  let paceStrokes = 0;
   let speedStrokes = 0;
   let dashStrokes = 0;
   const noop = () => {};
@@ -615,7 +678,8 @@ function browserHarness(scenario, {
     fill: () => { draws++; },
     stroke() {
       if (typeof this.strokeStyle !== 'string') return;
-      if (this.strokeStyle.startsWith('rgba(195, 230, 255,')) dashStrokes++;
+      if (this.strokeStyle === '#c9a3f4') paceStrokes++;
+      else if (this.strokeStyle.startsWith('rgba(195, 230, 255,')) dashStrokes++;
       else if (this.strokeStyle.startsWith('rgba(')) speedStrokes++;
     },
   }, { get: (target, key) => target[key] ?? noop });
@@ -659,7 +723,7 @@ function browserHarness(scenario, {
   };
   return {
     dom, ids, classes, Scene: context.VoidScene, draws: () => draws,
-    speedStrokes: () => speedStrokes, dashStrokes: () => dashStrokes,
+    paceStrokes: () => paceStrokes, speedStrokes: () => speedStrokes, dashStrokes: () => dashStrokes,
     get scene() { return scene; }, get runner() { return runner; },
     key(type, code, repeat = false, options = {}) {
       let prevented = false;
@@ -1049,6 +1113,9 @@ test('keyboard uses S and Down for slides, requires a fresh press, and keeps Spa
   assert.equal(game.runner.sliding, true);
   assert.ok(game.speedStrokes() > 0);
   assert.equal(game.dashStrokes(), 0);
+  const paceStrokes = game.paceStrokes();
+  game.step(4);
+  assert.equal(game.paceStrokes(), paceStrokes);
 });
 
 test('page wiring reports a collision, restarts with one button, and dashes with X', () => {
@@ -1083,7 +1150,7 @@ test('center and exterior closures expose deep walls and an empty deck before an
   const { Scene } = browserHarness('gap-edge');
   let stars = 0;
   const ctx = { beginPath() {}, arc() { stars++; }, fill() {}, fillRect() {} };
-  const renderer = Object.assign(Object.create(Scene.prototype), { cameraBack: 10.8, ctx });
+  const renderer = Object.assign(Object.create(Scene.prototype), { cameraBack: 10.8, ctx, particles: [] });
   renderer.setViewDistance(MIN_VIEW_DISTANCE);
   const flats = [];
   const boxes = [];
@@ -1095,6 +1162,7 @@ test('center and exterior closures expose deep walls and an empty deck before an
 
   for (const scenario of ['gap', 'gap-edge']) {
     const run = new Run({ scenario });
+    renderer.reset(run.speed);
     const gap = run.obstacles.find((obstacle) => obstacle.type === 'gap');
     const middle = laneX(gap.lane);
     const left = middle - LANE_WIDTH / 2;
@@ -1169,8 +1237,10 @@ test('W keeps the blue edge effect and badge active late in the dash', () => {
   assert.equal(game.ids['dash-status'].textContent, 'Dash active');
   assert.ok(game.dashStrokes() > strokes);
   assert.equal(game.speedStrokes(), 0);
+  assert.equal(game.paceStrokes(), 0);
   game.step(9);
   assert.equal(game.ids['dash-status'].textContent, '');
+  assert.ok(game.paceStrokes() > 0);
   const finishedStrokes = game.dashStrokes();
   game.step(20);
   game.key('keydown', 'KeyW', true);
@@ -1186,6 +1256,7 @@ test('reduced motion keeps a sustained dash badge and skips animated streaks', (
   assert.equal(game.ids['dash-status'].textContent, 'Dash active');
   assert.ok(Number(game.ids.speed.textContent) > START_SPEED);
   assert.equal(game.speedStrokes(), 0);
+  assert.equal(game.paceStrokes(), 0);
   assert.equal(game.dashStrokes(), 0);
   game.step(9);
   assert.equal(game.ids['dash-status'].textContent, '');
@@ -1520,6 +1591,140 @@ test('actual acceleration, dash, and power slide move the FOV smoothly and withi
   assert.ok(Math.abs(focalAt(1_000_000) / baseline - 0.68) < 0.0001);
 });
 
+test('world-anchored rail reflectors move outward from the first steps and strengthen with pace', () => {
+  const game = browserHarness('landing');
+  game.step(1);
+  const view = game.scene;
+  view.openingBlend = 0;
+  const sample = (run, cuts = []) => {
+    view.frameCamera(run);
+    const mounts = [];
+    const trails = [];
+    const { box, face } = view;
+    view.box = (x, y, z, _width, _height, depth) => {
+      mounts.push({ x, z, depth, opacity: view.ctx.globalAlpha, screenX: view.screenPoint(view.viewPoint([x, y, z]))[0] });
+    };
+    view.face = (points) => trails.push(points);
+    try {
+      view.railReflectors(run, cuts, run.distance - view.rearViewDistance, run.distance + view.viewDistance);
+    } finally {
+      Object.assign(view, { box, face });
+    }
+    return { mounts, trails };
+  };
+
+  const run = new Run({ scenario: 'landing' });
+  view.reset(run.speed);
+  const start = sample(run);
+  const startScale = view.longitudinalScale;
+  const atWorldAnchor = (mounts, anchor) => mounts.find(({ x, z }) => x > 0 && Math.abs(z + run.distance - anchor) < 1e-8);
+  const atStart = atWorldAnchor(start.mounts, 10);
+  assert.ok(atStart);
+  for (let tick = 0; tick < 12; tick++) run.tick();
+  const next = atWorldAnchor(sample(run).mounts, 10);
+  assert.ok(next.z < atStart.z && next.screenX > atStart.screenX);
+
+  const fast = new Run({ scenario: 'landing', pace: 'fast' });
+  view.reset(fast.speed);
+  const fastSamples = sample(fast);
+  const longestTrail = ({ trails }, scale) => Math.max(...trails.map(([start, _side, end]) => (end[2] - start[2]) * scale));
+  assert.ok(longestTrail(fastSamples, view.longitudinalScale) > longestTrail(start, startScale) * 1.5);
+
+  const blocked = sample(run, [{ lane: 0, z: 9, end: 11 }]);
+  assert.ok(atWorldAnchor(blocked.mounts, 10));
+  assert.ok(!blocked.mounts.some(({ x, z }) => x < 0 && Math.abs(z + run.distance - 10) < 1e-8));
+  assert.ok(blocked.trails.filter(([point]) => point[0] < 0).every(([start, _other, end]) =>
+    end[2] + run.distance <= 9 || start[2] + run.distance >= 11));
+
+  for (const speed of [109.99, 110, 572, 1500, 10_000]) {
+    run.distance = 89_600;
+    run.baseSpeed = run.speed = speed;
+    view.reset(speed);
+    const { mounts } = sample(run);
+    assert.ok(mounts.length >= 4 && mounts.length <= 50, `${speed} m/s draws ${mounts.length} mounts`);
+    assert.equal(atWorldAnchor(mounts, 89_600).opacity, 1);
+    if (speed < 110) assert.ok(atWorldAnchor(mounts, 89_610).opacity < 0.001);
+    if (speed === 110) assert.equal(atWorldAnchor(mounts, 89_610), undefined);
+  }
+});
+
+test('running cadence and rail streaks respond to braking and recover consistently across frame rates', () => {
+  const game = browserHarness('landing');
+  game.step(1);
+  const view = game.scene;
+  for (const speed of [START_SPEED, FAST_START_SPEED, 572]) {
+    const run = new Run({ scenario: 'landing' });
+    run.baseSpeed = run.speed = speed;
+    view.reset(speed);
+    const pace = view.pace;
+    run.slide();
+    run.tick();
+    view.updateSpeed(run, 0.10, 'running');
+    assert.ok(view.pace > pace * 0.65 && view.pace < pace * 0.72);
+
+    run.jump();
+    run.tick();
+    for (let i = 0; i < 5; i++) view.updateSpeed(run, 0.1, 'running');
+    assert.ok(Math.abs(view.pace - pace) < 0.004);
+  }
+
+  const sample = (frames) => {
+    view.reset(START_SPEED);
+    for (let i = 0; i < frames; i++) view.updateSpeed({ speed: FAST_START_SPEED }, 0.72 / frames, 'running');
+    return [view.pace, view.stridePhase];
+  };
+  const slowFrames = sample(15);
+  assert.ok(sample(43).every((value, i) => Math.abs(value - slowFrames[i]) < 1e-12));
+});
+
+test('ordinary pace streaks build in the outer safe gutters without replacing the special effects', () => {
+  const game = browserHarness('landing');
+  game.step(1);
+  assert.equal(game.paceStrokes(), 0);
+  game.click('start');
+  game.step(2);
+  assert.ok(game.paceStrokes() > 0);
+  assert.equal(game.speedStrokes(), 0);
+  assert.equal(game.dashStrokes(), 0);
+  const view = game.scene;
+  const run = new Run({ scenario: 'landing' });
+  for (const [width, height, safe] of [[390, 685, {}], [667, 280, { left: 44, right: 18 }], [1440, 900, {}]]) {
+    game.resize(width, height, safe);
+    const points = [];
+    let start;
+    let end;
+    const { ctx } = view;
+    const { moveTo, lineTo, stroke } = ctx;
+    ctx.moveTo = (x, y) => { start = [x, y]; };
+    ctx.lineTo = (x, y) => { end = [x, y]; };
+    ctx.stroke = () => {
+      if (ctx.strokeStyle === '#c9a3f4') points.push({ x1: start[0], x2: end[0], alpha: ctx.globalAlpha });
+    };
+    const sample = (speed) => {
+      points.length = 0;
+      run.speed = run.baseSpeed = speed;
+      view.reset(speed);
+      view.draw(run, 1, 0, 'running');
+      const left = safe.left ?? 0;
+      const right = width - (safe.right ?? 0);
+      const gutter = (right - left) * 0.16;
+      assert.ok(points.length > 0 && points.length <= 16);
+      assert.ok(points.every(({ x1, x2 }) =>
+        (x2 >= left && x2 <= x1 && x1 <= left + gutter) || (x1 >= right - gutter && x1 <= x2 && x2 <= right)));
+      return [Math.max(...points.map(({ x1, x2 }) => Math.abs(x1 - x2))), Math.max(...points.map(({ alpha }) => alpha))];
+    };
+    try {
+      const startPace = sample(32);
+      const fastPace = sample(64);
+      const highPace = sample(572);
+      assert.ok(fastPace.every((value, index) => value > startPace[index] * 1.3));
+      assert.ok(highPace.every((value, index) => value > fastPace[index] * 1.6));
+    } finally {
+      Object.assign(ctx, { moveTo, lineTo, stroke });
+    }
+  }
+});
+
 test('speed framing preserves readable outer lanes, and reduced motion and restart reset the lens', () => {
   const game = browserHarness('camera');
   game.ids.start.events.click();
@@ -1555,21 +1760,31 @@ test('speed framing preserves readable outer lanes, and reduced motion and resta
   game.step(1);
   assert.equal(game.runner.speed, START_SPEED);
   assert.equal(scene.widening, 0);
+  assert.equal(scene.stridePhase, 0);
+  assert.equal(scene.boostRush, 0);
 
   const reduced = browserHarness('camera', { reducedMotion: true, pace: 'fast' });
   reduced.ids.start.events.click();
   reduced.step(1);
   const resting = reduced.scene.focal;
+  let railFrames = 0;
+  reduced.scene.railReflectors = () => { railFrames++; };
   reduced.key('keydown', 'KeyW');
   reduced.step(18);
   assert.ok(reduced.runner.speed > FAST_START_SPEED + 7);
   assert.equal(reduced.scene.focal, resting);
+  assert.equal(railFrames, 0);
+  assert.equal(reduced.scene.stridePhase, 0);
   reduced.changeReducedMotion(false);
   reduced.step(8);
   assert.ok(reduced.scene.focal < resting);
+  assert.equal(railFrames, 8);
   reduced.changeReducedMotion(true);
   reduced.step(1);
   assert.equal(reduced.scene.focal, resting);
+  assert.equal(railFrames, 8);
+  assert.equal(reduced.scene.pace, 0);
+  assert.equal(reduced.scene.stridePhase, 0);
 });
 
 test('rendering keeps a readable reaction horizon, exact cut lip, and bounded work at high speed', () => {
@@ -1669,7 +1884,7 @@ test('fixed longitudinal gaps use one scale across the runner, boosts, and deck 
   const sample = (distance) => {
     scene.setViewDistance(distance);
     layers.clear();
-    scene.track({ distance: 0, lane: 2, obstacles: [] }, false);
+    scene.track({ distance: 0, baseSpeed: START_SPEED, lane: 2, obstacles: [] }, false);
     return new Map(layers);
   };
   // Find the two sides of one grid step, so the test does not depend on its absolute distance.

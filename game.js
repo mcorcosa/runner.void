@@ -28,8 +28,18 @@
   const SPIKE_CLEAR_TIME = 2 * Math.sqrt(JUMP_SPEED ** 2 - 2 * GRAVITY * SPIKE_HEIGHT) / GRAVITY;
   const SPIKE_DESCENT_TIME = (JUMP_SPEED / GRAVITY) + SPIKE_CLEAR_TIME / 2;
   const GROUND_DASH_AIR_TRAVEL = DASH_SPEED * DASH_TIME * (2 / 3) * GROUND_DASH_AIR_SPEED;
-  const SPIKES_INTRO = 360;
-  const CLOSURES_INTRO = 670;
+  const OPENING = [[78, 2, 'hurdle'], [165, 2, 'barrier']];
+  const HAZARD_INTRODUCTIONS = [
+    { distance: 360, tiles: 1, lanes: 1 },
+    { distance: 640, tiles: 2, lanes: 1 },
+    { distance: 900, tiles: 1, lanes: 2 },
+    { distance: 1200, type: 'closure' },
+  ];
+  const COURSE_DIFFICULTIES = [
+    { distance: 3600, standardCount: [3, 4], closureCount: [2, 3], longChance: 0.78, wideChance: 0.75 },
+    { distance: 1800, standardCount: [2, 3], closureCount: [1, 2], longChance: 0.48, wideChance: 0.40 },
+    { distance: 0, standardCount: [1, 1], closureCount: [1, 1], longChance: 0, wideChance: 0.25 },
+  ];
   const MAX_EXTRA_SPEED = BOOST_SPEED + DASH_SPEED;
   const CLOSURE_SECONDS = 3;
   const MIN_VIEW_DISTANCE = 186;
@@ -163,11 +173,12 @@
       this.obstacles = [];
       this.openLanes = LANES.filter((lane) => lane !== 2);
       this.id = 0;
-      this.nextSpikes = SPIKES_INTRO;
-      this.nextClosure = CLOSURES_INTRO;
+      this.introduction = 0;
+      this.nextSpikes = Infinity;
+      this.nextClosure = Infinity;
       this.closure = null;
 
-      const opening = this.scripted ? scenarios[scenario] : [[78, 2, 'hurdle'], [165, 2, 'barrier']];
+      const opening = this.scripted ? scenarios[scenario] : OPENING;
       for (const [z, lane, type, tilesOrLength, lanes] of opening) {
         if (type === 'spikes') this.addSpikes(z, lane, tilesOrLength, lanes);
         else if (type === 'gap') this.addClosure(z, lane, tilesOrLength);
@@ -212,6 +223,22 @@
       return Math.ceil(forwardEnvelope(this.upperBaseAt(z) + MAX_EXTRA_SPEED, seconds));
     }
 
+    placeSpikeRow(z, lane, tiles, lanes) {
+      this.openLanes = LANES.filter((next) => next < lane || next >= lane + lanes);
+      this.lastHazardEnd = this.addSpikes(z, lane, tiles, lanes);
+      this.nextSpikes = this.lastHazardEnd + this.distanceIn(this.lastHazardEnd, 1.1 + this.random() * 1.5);
+    }
+
+    placeClosureRow(z, lane) {
+      const seconds = CLOSURE_SECONDS + this.random() * 0.5;
+      const end = this.addClosure(z, lane, this.distanceIn(z, seconds));
+      this.openLanes = LANES.filter((next) => next !== lane);
+      const neighbors = this.openLanes.filter((next) => Math.abs(next - lane) === 1);
+      const throughLane = neighbors[Math.floor(this.random() * neighbors.length)];
+      this.closure = { lane, throughLane, end };
+      this.nextClosure = end + this.distanceIn(end, 3.55 + this.random() * 1.8);
+    }
+
     populate() {
       if (this.scripted) return;
       while (this.lastHazardEnd < this.distance + this.viewDistance) {
@@ -219,12 +246,14 @@
         const gap = this.rowClearance(previousEnd);
         const variation = Math.floor(this.random() * (this.upperBaseAt(previousEnd) + MAX_EXTRA_SPEED) * 0.08);
         const z = previousEnd + gap + variation;
+        // Lookahead can generate a row well before the runner reaches its difficulty gate.
+        const difficulty = COURSE_DIFFICULTIES.find(({ distance }) => z >= distance);
 
         if (this.closure) {
           const { lane, throughLane, end } = this.closure;
           if (end - z >= this.rowClearance(z)) {
             this.lastHazardEnd = z;
-            this.addStandardRow(z, lane, throughLane);
+            this.addStandardRow(z, difficulty.closureCount, lane, throughLane);
           } else {
             this.lastHazardEnd = end;
             this.openLanes = LANES.filter((next) => next !== lane);
@@ -234,42 +263,39 @@
         }
 
         this.lastHazardEnd = z;
+        const intro = HAZARD_INTRODUCTIONS[this.introduction];
+        if (intro) {
+          if (z < intro.distance) this.addStandardRow(z, difficulty.standardCount);
+          else {
+            this.introduction++;
+            if (intro.type === 'closure') this.placeClosureRow(z, 2);
+            else this.placeSpikeRow(z, 2, intro.tiles, intro.lanes);
+          }
+          continue;
+        }
 
         if (z >= this.nextClosure || z >= this.nextSpikes) {
           const closure = z >= this.nextClosure;
-          const introduced = this.nextSpikes !== SPIKES_INTRO;
-          const width = !closure && introduced && this.random() < 0.6 ? 2 : 1;
+          const width = !closure && this.random() < difficulty.wideChance ? 2 : 1;
           const candidates = LANES.filter((lane) => lane + width <= LANE_COUNT && this.reachable(
             LANES.filter((next) => next < lane || next >= lane + width)
           ));
           const lane = candidates[Math.floor(this.random() * candidates.length)];
           if (lane !== undefined) {
-            this.openLanes = LANES.filter((next) => next < lane || next >= lane + width);
-            if (closure) {
-              const seconds = CLOSURE_SECONDS + this.random() * 0.5;
-              const end = this.addClosure(z, lane, this.distanceIn(z, seconds));
-              const neighbors = this.openLanes.filter((next) => Math.abs(next - lane) === 1);
-              const throughLane = neighbors[Math.floor(this.random() * neighbors.length)];
-              this.closure = { lane, throughLane, end };
-              this.nextClosure = end + this.distanceIn(end, 3.55 + this.random() * 1.8);
-            } else {
-              const tiles = introduced && this.random() < 0.7 ? 2 : 1;
-              this.lastHazardEnd = this.addSpikes(z, lane, tiles, width);
-              this.nextSpikes = this.lastHazardEnd + this.distanceIn(this.lastHazardEnd, 1.1 + this.random() * 1.5);
-            }
+            if (closure) this.placeClosureRow(z, lane);
+            else this.placeSpikeRow(z, lane, this.random() < difficulty.longChance ? 2 : 1, width);
             continue;
           }
         }
 
-        this.addStandardRow(z);
+        this.addStandardRow(z, difficulty.standardCount);
       }
     }
 
-    addStandardRow(z, closedLane = -1, throughLane = -1) {
+    addStandardRow(z, [minCount, maxCount], closedLane = -1, throughLane = -1) {
       let open = LANES.filter((lane) => lane !== closedLane);
       const candidates = open.filter((lane) => lane !== throughLane);
-      const count = closedLane >= 0 ? 1 + Math.floor(this.random() * 2) :
-        2 + Math.floor(this.random() * (z > 340 ? 3 : 2));
+      const count = minCount + Math.floor(this.random() * (maxCount - minCount + 1));
       const target = open.length - count;
       while (candidates.length && open.length > target) {
         const pick = Math.floor(this.random() * candidates.length);

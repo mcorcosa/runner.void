@@ -27,6 +27,12 @@ Installed launches prefer fullscreen on supporting devices and fall back to stan
 
 When the browser offers a native install prompt, **Install** opens it directly. Each prompt offer can be used once. After dismissal, **Install** shows browser-menu guidance until a fresh offer arrives. The button is available on the start screen and hides in the installed app or when the browser confirms installation. Serve this folder over HTTPS for browsers that require a secure origin. LAN and direct-file launch remain available for ordinary play. [Chrome’s install guidance](https://developer.chrome.com/docs/modern-web-guidance/guides/pwa/install-web-app)
 
+## Endless runs
+
+The violet reflectors along the deck edges show forward motion from the start. Their trails grow as you gain speed and shorten when you slide.
+
+The course opens with a hurdle and a cracked barrier. It introduces short, long, and wide spike patches in that order, then lane closures. Later rows cover more lanes, and long and wide spike patches become more common. Follow clear lanes and move one lane at a time to bypass obstacles.
+
 ## Acceptance scenarios
 
 Open the game in your browser and append `?scenario=landing` to its address. Replace `landing` with any scenario below. Append `&pace=fast` to start a scripted run at 64 m/s with normal acceleration. Distances use the HUD reading. Open `index.html` without a scenario for the endless run, or add `?seed=42` to reproduce a course.
@@ -38,11 +44,11 @@ Open the game in your browser and append `?scenario=landing` to its address. Rep
 - `dash-expiry` puts a cracked barrier at 76 m. Dash around 37 m and let it expire before you reach the barrier, then retry around 44 m to break it. At fast pace, use 18 m and 24 m respectively.
 - `spike-short` places one red tile at 90 m. Jump around 85–87 m, or 78–83 m at fast pace.
 - `spike-long` places two tiles at 90 m in the center and the next lane right. Stay centered, jump around 84–86 m (78–84 m at fast pace), then press W or X around 90–100 m. A jump alone fails. To see where a ground dash falls short even with a power slide, jump around 49 m (20 m at fast pace) and press Down Arrow or S on the mint cue. Once **Power slide** appears at touchdown around 80 m (76 m at fast pace), press W, then immediately press Space. The runner hits the patch while descending.
-- `camera` gives you a clear runway to 1,180 m. Stay centered and watch the view widen through 64 m/s at about 18 seconds. Dash and time a power slide to see it widen further and ease back. Hit the final barrier and restart to check the starting lens. Enable system reduced motion to check fixed FOV.
+- `camera` gives you a clear runway to 1,180 m. Watch the reflector trails grow and the view widen as you reach 64 m/s, about 18 seconds into the run. Try a regular slide to see the trails shorten. Dash or time a power slide to see the view widen further and ease back. Hit the final barrier and restart to check the starting lens. Enable system reduced motion to check fixed FOV and that the animated speed effects disappear.
 - `gap` cuts the center lane from 66 to 386 m. Dodge left by 50 m. Around 150 m the cut shows the deep sky and exposed walls before the far lip enters view. Steer right around 200 m to test side entry, or wait until 387 m to move back safely. A straight dash into the roadblock hits it.
 - `gap-edge` cuts the far-left lane and its outside rail from 67 to 390 m. Stay one lane to its right and look for the exposed edge, then reenter after 391 m.
 - `high-speed` starts at 572 m/s for a quick render check. The center hurdle is at 620 m. Steer right early and watch it grow steadily through contact and pass below the runner. View the far-left cut from 1,240 to 3,240 m as its lip comes into view. Stay right of center to see the center barrier at 2,350 m and the long spike patch starting at 3,920 m on the center and next lane left. Add `&pace=fast` to start this layout at 64 m/s.
-- `?seed=187` runs the actual endless generator. On a run without speed bursts, the first center closure spans **741–1,055 m**. A normal run reaches 140 m/s at 60 seconds and 572 m/s at five minutes of active play.
+- `?seed=187` runs the endless generator. Steer around the hazards using lane changes alone. The first short, long, and wide spike patches begin at **390 m**, **672 m**, and **924 m**. The first center closure spans **1,247–1,600 m**. Base speed reaches 140 m/s at 60 seconds and 572 m/s at five minutes of active play.
 - `lanes` puts a blocker in the starting lane. Hold an arrow to confirm you move just one lane. Release and press again to move another lane.
 
 On touch, try `lanes` for one move per swipe. Use `landing` to try a ground slide, a jump into a power slide, and Dash charge. Use `spike-long` to try a jump followed by a second-finger Dash. Rotate during an unfinished swipe in `landing` and confirm that lifting the old touch does nothing. Try a fresh swipe in the new orientation, then check **Run again** after a collision in `hurdle`.

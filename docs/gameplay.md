@@ -1,4 +1,4 @@
-# 3D Void Runner first playable
+# run.void first playable
 
 The owner approved the first-playable scope below, including all three proposed defaults, and authorized implementation on 19 November 2026.
 

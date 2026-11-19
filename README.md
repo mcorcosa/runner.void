@@ -1,4 +1,6 @@
-# Void Runner
+# run.void
+
+**[Play run.void](https://mcorcosa.github.io/runner.void/)**
 
 Open [index.html](index.html) in a browser and choose **Start run** or press **Enter**. On a phone, open the same page in its browser. The page works directly from disk in browsers that allow local pages to load neighboring files.
 
@@ -20,7 +22,7 @@ For a phone on the same Wi-Fi network, run `python -m http.server 8000` from thi
 
 On touch, **Start run** and **Run again** ask the browser to fullscreen the game and its controls. Play starts immediately in the available viewport. Rotate freely or use the browser’s fullscreen exit gesture. The current run continues, and the next touch on **Run again** can try fullscreen again. Keyboard and mouse starts work as before. [Fullscreen API Standard](https://fullscreen.spec.whatwg.org/)
 
-Installed launches prefer fullscreen on supporting devices and fall back to standalone. On iPhone, tap **Install** on the start screen for the Safari steps. Tap **Share** (inside the Page Menu on some layouts), choose **Add to Home Screen**, turn on **Open as Web App** if shown, and tap **Add**. Open **Void Runner** from its Home Screen icon. Use **Done** or Escape to dismiss the in-game instructions. [Apple’s Home Screen guide](https://support.apple.com/guide/iphone/open-as-web-app-iphea86e5236/ios)
+Installed launches prefer fullscreen on supporting devices and fall back to standalone. On iPhone, tap **Install** on the start screen for the Safari steps. Tap **Share** (inside the Page Menu on some layouts), choose **Add to Home Screen**, turn on **Open as Web App** if shown, and tap **Add**. Open **run.void** from its Home Screen icon. Use **Done** or Escape to dismiss the in-game instructions. [Apple’s Home Screen guide](https://support.apple.com/guide/iphone/open-as-web-app-iphea86e5236/ios)
 
 When the browser offers a native install prompt, **Install** opens it directly. Each prompt offer can be used once. After dismissal, **Install** shows browser-menu guidance until a fresh offer arrives. The button is available on the start screen and hides in the installed app or when the browser confirms installation. Serve this folder over HTTPS for browsers that require a secure origin. LAN and direct-file launch remain available for ordinary play. [Chrome’s install guidance](https://developer.chrome.com/docs/modern-web-guidance/guides/pwa/install-web-app)
 

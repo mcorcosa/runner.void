@@ -6,8 +6,8 @@
   <meta name="theme-color" content="#090711">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-  <meta name="apple-mobile-web-app-title" content="Void Runner">
-  <title>Void Runner</title>
+  <meta name="apple-mobile-web-app-title" content="run.void">
+  <title>run.void</title>
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="apple-touch-icon" sizes="180x180" href="icons/apple-touch-icon.png">
   <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
@@ -17,7 +17,7 @@
   <script src="app.js" defer></script>
 </head>
 <body data-mode="ready">
-  <main class="game" id="game" aria-label="Void Runner">
+  <main class="game" id="game" aria-label="run.void">
     <canvas id="scene" aria-hidden="true"></canvas>
     <div class="vignette" aria-hidden="true"></div>
     <div id="swipe-field" class="swipe-field" aria-hidden="true" hidden></div>
@@ -28,7 +28,7 @@
           <path d="M18 2 32 10v16l-14 8-14-8V10Z" fill="#211639" stroke="#b48cff" stroke-width="1.3"/>
           <path d="M11 13.5 18 25l7-11.5M11 13.5l7 4 7-4M18 17.5V25" fill="none" stroke="#e0caff" stroke-width="1.5" stroke-linejoin="round"/>
         </svg>
-        <span>VOID<span class="brand-accent">/</span>RUNNER</span>
+        <span>run<span class="brand-accent">.</span>void</span>
       </div>
       <div class="telemetry" aria-label="Run statistics">
         <div class="metric"><span class="label">Distance</span><span class="reading"><span id="distance">0000</span> <small>m</small></span></div>
@@ -39,7 +39,7 @@
 
     <section class="intro" aria-labelledby="game-title">
       <div class="title-rule" aria-hidden="true"></div>
-      <h1 id="game-title">VOID<br><span>RUNNER</span></h1>
+      <h1 id="game-title" aria-label="run.void">run.<br aria-hidden="true"><span>void</span></h1>
       <p>Jump hurdles and short spike patches. Dash midair over long spikes. Change lanes before yellow roadblocks.</p>
       <p class="touch-instructions">Swipe sideways to move. Swipe up to jump, then again at landing for a boost. Tap Dash with either finger.</p>
       <div class="actions">
@@ -51,7 +51,7 @@
 
     <dialog id="install-guide" class="install-guide" aria-labelledby="install-title" aria-modal="true">
       <div class="install-panel">
-        <h2 id="install-title">Install Void Runner</h2>
+        <h2 id="install-title">Install run.void</h2>
         <p id="install-host-note" hidden>Open the hosted game in your browser first.</p>
         <ol id="install-apple-steps" class="install-steps" role="list" hidden>
           <li>
@@ -101,9 +101,9 @@
           <li>
             <div class="install-picture install-home" aria-hidden="true">
               <img src="icons/apple-touch-icon.png" width="32" height="32" alt="">
-              <span>Void Runner</span>
+              <span>run.void</span>
             </div>
-            <div><strong>Launch Void Runner</strong><small>From the Home Screen.</small></div>
+            <div><strong>Launch run.void</strong><small>From the Home Screen.</small></div>
           </li>
         </ol>
         <p id="install-browser-steps" hidden>Open your browser’s menu and look for <strong>Install app</strong> or <strong>Add to Home Screen</strong>. Availability depends on the browser.</p>

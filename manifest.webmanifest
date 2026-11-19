@@ -1,6 +1,6 @@
 {
-  "name": "Void Runner",
-  "short_name": "Void Runner",
+  "name": "run.void",
+  "short_name": "run.void",
   "start_url": "./index.html",
   "scope": "./",
   "display_override": ["fullscreen", "standalone"],

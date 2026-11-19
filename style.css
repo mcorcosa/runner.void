@@ -414,9 +414,6 @@ body[data-touch="true"] .feedback {
   }
   .title-rule { display: none; }
   .intro h1 {
-    display: flex;
-    flex-wrap: wrap;
-    gap: .14em;
     font-size: clamp(31px, min(7.4vw, 12dvh), 60px);
     line-height: .98;
   }

@@ -1,0 +1,650 @@
+(function () {
+  'use strict';
+
+  const { LANE_WIDTH, LANE_COUNT, START_SPEED, MAX_SPEED, MAX_EXTRA_SPEED, SPIKE_HEIGHT, laneX, obstacles } = globalThis.VoidRunner;
+  const ROAD_HALF = LANE_WIDTH * LANE_COUNT / 2;
+  const TILE = 6;
+  const TRACK_VIEW = 186;
+  const CUT_DEPTH = 1.4;
+  const NEAR = 1.3;
+  const PITCH = 0.207;
+  const SIN = Math.sin(PITCH);
+  const COS = Math.cos(PITCH);
+
+  const steel = ['#ada4d5', '#4b426a', '#80739f'];
+  const violet = ['#aa89f4', '#36274f', '#624693'];
+  const suit = ['#63558c', '#252036', '#3f345a'];
+  const amber = ['#ffd18b', '#a65a3a', '#d58b53'];
+  const pink = ['#e49aff', '#823c9c', '#a65ac1'];
+
+  function repeatable(index) {
+    const value = Math.sin(index * 19.829 + 4.51) * 43758.5453;
+    return value - Math.floor(value);
+  }
+
+  function speedWidening(speed) {
+    const base = Math.max(0, Math.min(1, (speed - START_SPEED) / (MAX_SPEED - START_SPEED)));
+    const surge = Math.max(0, Math.min(1, (speed - MAX_SPEED) / MAX_EXTRA_SPEED));
+    return base * 0.18 + surge * 0.12;
+  }
+
+  function clip(points) {
+    const visible = [];
+    for (let index = 0; index < points.length; index++) {
+      const point = points[index];
+      const next = points[(index + 1) % points.length];
+      if (point[2] >= NEAR) visible.push(point);
+      if ((point[2] >= NEAR) !== (next[2] >= NEAR)) {
+        const mix = (NEAR - point[2]) / (next[2] - point[2]);
+        visible.push([point[0] + (next[0] - point[0]) * mix, point[1] + (next[1] - point[1]) * mix, NEAR]);
+      }
+    }
+    return visible;
+  }
+
+  class Scene {
+    constructor(canvas) {
+      this.canvas = canvas;
+      this.ctx = canvas.getContext('2d', { alpha: false });
+      this.stars = Array.from({ length: 125 }, (_, index) => ({
+        x: repeatable(index * 3), y: repeatable(index * 3 + 1) * 0.86,
+        light: repeatable(index * 3 + 2),
+      }));
+      const motion = matchMedia('(prefers-reduced-motion: reduce)');
+      this.reduceMotion = motion.matches;
+      motion.addEventListener?.('change', (event) => {
+        this.reduceMotion = event.matches;
+        if (this.reduceMotion) this.reset();
+      });
+      this.openingBlend = 1;
+      this.particles = [];
+      this.speedLines = Array.from({ length: 36 }, (_, index) => {
+        const angle = (repeatable(index * 5 + 471) - 0.5) * 2.3;
+        return {
+          x: Math.cos(angle) * (index % 2 ? 1 : -1),
+          y: Math.sin(angle),
+          offset: repeatable(index * 5 + 472),
+          pace: 0.72 + repeatable(index * 5 + 473) * 0.46,
+          size: 0.44 + repeatable(index * 5 + 474) * 0.56,
+        };
+      });
+      this.reset();
+    }
+
+    resize() {
+      const width = this.canvas.clientWidth;
+      const height = this.canvas.clientHeight;
+      const ratio = Math.min(devicePixelRatio || 1, 2);
+      const style = getComputedStyle(this.canvas);
+      const insets = ['left', 'top', 'right', 'bottom'].map((side) =>
+        parseFloat(style.getPropertyValue(`--safe-${side}`)) || 0);
+      if (width === this.width && height === this.height && ratio === this.ratio &&
+          insets.every((value, index) => value === this.insets[index])) return false;
+      this.width = width;
+      this.height = height;
+      this.ratio = ratio;
+      this.insets = insets;
+      const pixelsWide = Math.round(width * ratio);
+      const pixelsHigh = Math.round(height * ratio);
+      if (this.canvas.width !== pixelsWide) this.canvas.width = pixelsWide;
+      if (this.canvas.height !== pixelsHigh) this.canvas.height = pixelsHigh;
+      this.ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+      return true;
+    }
+
+    reset(speed = START_SPEED) {
+      this.particles.length = 0;
+      this.speedPulse = 0;
+      this.speedTravel = 0;
+      this.rush = 0;
+      this.widening = this.reduceMotion ? 0 : speedWidening(speed);
+    }
+
+    pulseSpeed() {
+      if (!this.reduceMotion) this.speedPulse = 1;
+    }
+
+    scatter(kind, run, obstacle) {
+      if (this.reduceMotion) return;
+      const impact = kind === 'break' || kind === 'crash';
+      const x = impact ? obstacle.impact.x : run.x;
+      const z = impact ? obstacle.impact.z : run.distance + 1;
+      const y = impact ? obstacle.impact.y : 0;
+      const color = kind === 'boost' ? '#98ffe3' : kind === 'land' ? '#ac89eb' :
+        obstacle.type === 'spikes' ? '#ff788e' : obstacle.type === 'roadblock' ? '#ffe787' : '#ec9dff';
+      const count = impact ? 28 : kind === 'boost' ? 18 : 8;
+      for (let index = 0; index < count; index++) {
+        this.particles.push({
+          x: x + (Math.random() - 0.5) * 1.35,
+          y: impact ? y + 0.12 + Math.random() * (kind === 'break' ? 1.15 : 0.55) : 0.1,
+          z: z + (Math.random() - 0.5) * 0.7,
+          vx: (Math.random() - 0.5) * 8,
+          vy: 0.6 + Math.random() * 4,
+          vz: (Math.random() - 0.65) * 14,
+          size: 0.035 + Math.random() * 0.09,
+          life: 0.38 + Math.random() * 0.42,
+          color,
+        });
+      }
+    }
+
+    viewPoint([x, y, z]) {
+      const dy = y - this.cameraY;
+      const dz = z + this.cameraBack;
+      return [x - this.cameraX, dy * COS + dz * SIN, dz * COS - dy * SIN];
+    }
+
+    screenPoint([x, y, z]) {
+      const scale = this.focal / z;
+      return [this.centerX + x * scale, this.centerY - y * scale];
+    }
+
+    face(points, color) {
+      const view = clip(points.map((point) => this.viewPoint(point)));
+      if (view.length < 3) return;
+      const { ctx } = this;
+      ctx.beginPath();
+      for (const [x, y] of view.map((point) => this.screenPoint(point))) ctx.lineTo(x, y);
+      ctx.closePath();
+      ctx.fillStyle = color;
+      ctx.fill();
+    }
+
+    flat(x1, x2, near, far, color, y = 0) {
+      this.face([[x1, y, near], [x2, y, near], [x2, y, far], [x1, y, far]], color);
+    }
+
+    box(x, y, z, width, height, depth, [topColor, frontColor, sideColor]) {
+      const left = x - width / 2;
+      const right = x + width / 2;
+      const top = y + height;
+      const near = z - depth / 2;
+      const far = z + depth / 2;
+      if (this.cameraX < left) {
+        this.face([[left, y, near], [left, top, near], [left, top, far], [left, y, far]], sideColor);
+      } else if (this.cameraX > right) {
+        this.face([[right, y, near], [right, top, near], [right, top, far], [right, y, far]], sideColor);
+      }
+      if (this.cameraY > top) this.flat(left, right, near, far, topColor, top);
+      this.face([[left, y, near], [right, y, near], [right, top, near], [left, top, near]], frontColor);
+    }
+
+    line(points, color, width) {
+      const view = points.map((point) => this.viewPoint(point));
+      if (view.some((point) => point[2] < NEAR)) return;
+      const { ctx } = this;
+      ctx.beginPath();
+      for (const [x, y] of view.map((point) => this.screenPoint(point))) ctx.lineTo(x, y);
+      ctx.strokeStyle = color;
+      ctx.lineWidth = width;
+      ctx.stroke();
+    }
+
+    sky(time) {
+      const { ctx, width, height, centerX, horizon } = this;
+      const backdrop = ctx.createLinearGradient(0, 0, 0, height);
+      backdrop.addColorStop(0, '#0c091a');
+      backdrop.addColorStop(0.41, '#160d27');
+      backdrop.addColorStop(1, '#07060e');
+      ctx.fillStyle = backdrop;
+      ctx.fillRect(0, 0, width, height);
+
+      const moonX = centerX + width * 0.05;
+      const moonY = horizon - height * 0.105;
+      const radius = height * 0.19;
+      const haze = ctx.createRadialGradient(moonX, moonY, 0, moonX, moonY, width * 0.46);
+      haze.addColorStop(0, '#8252c74d');
+      haze.addColorStop(0.27, '#6736a939');
+      haze.addColorStop(1, '#4a237000');
+      ctx.fillStyle = haze;
+      ctx.fillRect(0, 0, width, height);
+
+      for (const star of this.stars) {
+        const size = star.light > 0.95 ? 2 : 1;
+        ctx.fillStyle = `rgba(212,185,255,${0.13 + star.light * 0.47})`;
+        ctx.fillRect(star.x * width, star.y * height, size, size);
+      }
+
+      const eclipse = ctx.createLinearGradient(0, moonY - radius, 0, moonY + radius);
+      eclipse.addColorStop(0, '#170e2b');
+      eclipse.addColorStop(1, '#35185132');
+      ctx.beginPath();
+      ctx.arc(moonX, moonY, radius, 0, Math.PI * 2);
+      ctx.fillStyle = eclipse;
+      ctx.fill();
+      ctx.strokeStyle = '#a978f36a';
+      ctx.lineWidth = 1.2;
+      ctx.stroke();
+
+      for (let ring = 0; ring < 3; ring++) {
+        ctx.beginPath();
+        ctx.arc(moonX, moonY, radius + 7 + ring * 12, Math.PI * (0.9 + ring * .17), Math.PI * (1.48 + ring * .25));
+        ctx.strokeStyle = ['#bf93ff5e', '#b488ec30', '#b488ec23'][ring];
+        ctx.lineWidth = 1;
+        ctx.stroke();
+      }
+
+      for (let i = 0; i < 30; i++) {
+        const side = i % 2 ? 1 : -1;
+        const x = centerX + side * width * (0.11 + repeatable(i + 37) * 0.45);
+        const y = horizon + height * (repeatable(i + 173) * .53 - .09);
+        const size = 1.5 + repeatable(i + 67) * 10;
+        ctx.save();
+        ctx.translate(x, y + Math.sin(time * 0.45 + i) * size * 0.25);
+        ctx.rotate(0.2 + repeatable(i + 89) * 1.6);
+        ctx.fillStyle = '#322248';
+        ctx.fillRect(-size / 2, -size / 2, size, size);
+        ctx.fillStyle = '#a278db52';
+        ctx.fillRect(-size / 2, -size / 2, size, 1);
+        ctx.restore();
+      }
+    }
+
+    deepVoid(distance) {
+      // Scattered geometry below the deck gives the sky visible through cuts a world-space parallax.
+      const stride = 19;
+      const first = Math.floor((distance + 12) / stride);
+      const last = Math.ceil((distance + TRACK_VIEW + 30) / stride);
+      for (let band = last; band >= first; band--) {
+        for (let lane = 0; lane < LANE_COUNT; lane++) {
+          const index = band * 89 + lane * 7;
+          const x = laneX(lane) + (repeatable(index) - 0.5) * LANE_WIDTH;
+          const y = -6 - repeatable(index + 1) * 15;
+          const z = band * stride + repeatable(index + 2) * stride - distance;
+          const size = 0.09 + repeatable(index + 3) ** 4 * 0.72;
+          this.ctx.globalAlpha = Math.max(0, Math.min(0.8, (225 - z) / 135));
+          this.box(x, y, z, size, size * 0.58, size * 1.8, ['#736792', '#372947', '#514163']);
+        }
+      }
+      this.ctx.globalAlpha = 1;
+    }
+
+    track(run, ready) {
+      const start = Math.floor((run.distance - this.cameraBack) / TILE);
+      const end = Math.ceil((run.distance + TRACK_VIEW) / TILE);
+      const gaps = run.obstacles.filter((obstacle) => obstacle.type === 'gap');
+      for (let tile = end; tile >= start; tile--) {
+        const z = tile * TILE;
+        const near = z - run.distance;
+        const far = near + TILE;
+        const dust = Math.min(1, Math.max(0.22, (210 - near) / 145));
+        this.ctx.globalAlpha = dust;
+        const support = tile % 3 === 0 ? near + TILE / 2 : null;
+        const selected = ready ? -1 : run.lane;
+        // Course rows have enough separation for only one closure to intersect a tile.
+        const gap = gaps.find((obstacle) => obstacle.z < z + TILE && obstacle.end > z);
+        if (gap) {
+          const entry = Math.max(near, gap.z - run.distance);
+          const resume = Math.min(far, gap.end - run.distance);
+          this.deckSection(resume, far, tile, selected, -1, support);
+          if (gap.end <= z + TILE && resume <= TRACK_VIEW) this.cutLip(laneX(gap.lane), resume);
+          this.deckSection(entry, resume, tile, selected, gap.lane, support);
+          this.deckSection(near, entry, tile, selected, -1, support);
+        } else {
+          this.deckSection(near, far, tile, selected, -1, support);
+        }
+      }
+      for (const gap of gaps) {
+        const x = laneX(gap.lane);
+        const entry = gap.z - run.distance;
+        const resume = gap.end - run.distance;
+        if (entry >= -this.cameraBack && entry <= TRACK_VIEW) {
+          this.ctx.globalAlpha = Math.min(1, (210 - entry) / 130);
+          this.flat(x - 1.17, x + 1.17, entry - 0.8, entry, '#dfb557', 0.034);
+        }
+        if (resume >= -this.cameraBack && resume + 1.52 <= TRACK_VIEW) {
+          this.ctx.globalAlpha = Math.min(1, (210 - resume) / 130);
+          this.flat(x - 1.19, x + 1.19, resume, resume + 0.58, '#59a3ab', 0.034);
+          for (const offset of [-0.78, 0, 0.78]) {
+            this.flat(x + offset - 0.20, x + offset + 0.20, resume + 0.62, resume + 1.52, '#99edf0', 0.034);
+          }
+        }
+      }
+      this.ctx.globalAlpha = 1;
+    }
+
+    deckSection(near, far, tile, selected, missing, support = null) {
+      if (far <= near) return;
+      const half = LANE_WIDTH / 2;
+      const cut = laneX(missing);
+      const surfaces = missing === -1 ? [[-ROAD_HALF, ROAD_HALF]] :
+        [[-ROAD_HALF, cut - half], [cut + half, ROAD_HALF]];
+      if (missing > 0) this.cutWall(cut - half, near, far);
+      if (missing >= 0 && missing < LANE_COUNT - 1) this.cutWall(cut + half, near, far);
+      for (const [left, right] of surfaces) {
+        if (right <= left) continue;
+        if (support !== null && support - 0.42 >= near && support + 0.42 <= far) {
+          this.box((left + right) / 2, -0.73, support, right - left, 0.47, 0.84, ['#201630', '#1a1128', '#462e68']);
+        }
+        this.flat(left, right, near, far, tile % 2 ? '#231a36' : '#271c3a');
+        this.flat(left, right, near, Math.min(far, near + 0.065), '#151022', 0.018);
+      }
+      if (missing > 0) this.flat(cut - half - 0.11, cut - half, near, far, '#715d92', 0.025);
+      if (missing >= 0 && missing < LANE_COUNT - 1) {
+        this.flat(cut + half, cut + half + 0.11, near, far, '#715d92', 0.025);
+      }
+      if (selected >= 0 && selected !== missing && far - near > 0.13) {
+        const x = laneX(selected);
+        this.flat(x - half + 0.045, x + half - 0.045, near + 0.065, far - 0.065,
+          tile % 2 ? '#302248' : '#302344', 0.012);
+      }
+      for (let lane = 1; lane < LANE_COUNT; lane++) {
+        if (lane === missing || lane - 1 === missing) continue;
+        const edge = -ROAD_HALF + lane * LANE_WIDTH;
+        this.flat(edge - 0.025, edge + 0.025, near, far, '#61477d', 0.019);
+        if (far - near > 1.05) {
+          this.flat(edge - 0.018, edge + 0.018, near + 1.05, Math.min(far, near + 2.1), '#9b77c7', 0.023);
+        }
+      }
+      for (const side of [-1, 1]) {
+        if (missing === (side < 0 ? 0 : LANE_COUNT - 1)) continue;
+        const edge = side * ROAD_HALF;
+        this.flat(edge - 0.20, edge + 0.20, near, far, '#583888', 0.025);
+        this.flat(edge - 0.037, edge + 0.037, near, far, '#a77cf9', 0.032);
+        if (far - near > 0.32) {
+          this.flat(edge - 0.064, edge + 0.064, near + 0.32, Math.min(far, near + 1.23), '#dfbcff', 0.037);
+        }
+      }
+    }
+
+    cutWall(x, near, far) {
+      this.face([[x, 0, near], [x, 0, far], [x, -CUT_DEPTH, far], [x, -CUT_DEPTH, near]], '#322745');
+      this.face([[x, 0, near], [x, 0, far], [x, -0.24, far], [x, -0.24, near]], '#806b9f');
+      this.face([[x, -0.87, near], [x, -0.87, far], [x, -1.03, far], [x, -1.03, near]], '#504368');
+    }
+
+    cutLip(x, z) {
+      const left = x - LANE_WIDTH / 2;
+      const right = x + LANE_WIDTH / 2;
+      this.face([[left, 0, z], [right, 0, z], [right, -CUT_DEPTH, z], [left, -CUT_DEPTH, z]], '#302a44');
+      this.face([[left, 0, z], [right, 0, z], [right, -0.21, z], [left, -0.21, z]], '#70adb9');
+    }
+
+    hurdle(x, z) {
+      this.box(x, 0, z, 1.92, 0.17, 0.47, ['#7b5271', '#44314d', '#987182']);
+      this.box(x, 0.17, z, 1.92, 0.54, 0.5, amber);
+      const front = z - 0.252;
+      const dashes = [-0.61, -0.13, 0.35];
+      for (const dash of dashes) {
+        this.face([[x + dash, .25, front], [x + dash + .19, .25, front],
+          [x + dash + .42, .61, front], [x + dash + .23, .61, front]], '#592f3d');
+      }
+      this.line([[x - 0.94, .67, front], [x + 0.94, .67, front]], '#ffe3ac', 1.6);
+    }
+
+    barrier(x, z) {
+      const front = z - 0.323;
+      this.box(x, 0, z, 1.98, 2.48, 0.64, pink);
+      this.face([[x - .82, .17, front], [x + .81, .17, front], [x + .81, 2.31, front],
+        [x - .54, 2.31, front], [x - .82, 2.03, front]], '#532766');
+      this.line([[x - .86, .16, front], [x - .86, 2.03, front], [x - .54, 2.34, front],
+        [x + .83, 2.34, front], [x + .83, .15, front], [x - .86, .15, front]], '#e4a8f8', 1.3);
+      const crack = [[x + .35, 2.30, front], [x - .08, 1.75, front], [x + .17, 1.45, front],
+        [x - .29, 1.09, front], [x - .07, 0.86, front], [x - .44, 0.16, front]];
+      this.line(crack, '#be5ede', 5.4);
+      this.line(crack, '#f7c1ff', 2);
+      this.line([[x + .7, .73, front], [x + .42, 1.01, front], crack[3], [x - .55, 1.44, front]], '#ec9df8', 1.1);
+    }
+
+    roadblock(x, z) {
+      const { width, height, depth } = obstacles.roadblock;
+      this.box(x, 0, z + depth / 2, width, height, depth, ['#ffe687', '#695036', '#b98a44']);
+      const front = z - 0.003;
+      this.face([[x - 1.10, 0.24, front], [x + 1.10, 0.24, front], [x + 1.10, 1.96, front],
+        [x - 1.10, 1.96, front]], '#2c2433');
+      for (const offset of [-0.69, 0, 0.69]) {
+        this.face([[x + offset - 0.28, 0.82, front], [x + offset + 0.04, 0.82, front],
+          [x + offset + 0.30, 1.38, front], [x + offset - 0.02, 1.38, front]], '#ffda65');
+      }
+      this.line([[x - 1.11, 1.92, front], [x + 1.11, 1.92, front]], '#fff1af', 2.2);
+      this.line([[x - 1.11, 0.29, front], [x + 1.11, 0.29, front]], '#ffc752', 1.7);
+    }
+
+    spikes(patch, distance) {
+      const left = laneX(patch.lane) - LANE_WIDTH / 2 + 0.1;
+      const right = left + LANE_WIDTH * patch.lanes - 0.2;
+      for (let tile = patch.tiles - 1; tile >= 0; tile--) {
+        const start = patch.z - distance + tile * patch.tileLength;
+        const end = start + patch.tileLength;
+        if (end < -this.cameraBack || start > 165) continue;
+        this.ctx.globalAlpha = Math.min(1, (195 - start) / 100);
+        this.flat(left, right, start, end, '#6d223b', 0.027);
+        this.flat(left + 0.08, right - 0.08, start + 0.7, end - 0.30, '#3e142c', 0.03);
+        this.flat(left, right, start, start + 0.48, '#ff6b8f', 0.034);
+        this.flat(left, right, end - 0.22, end, '#b54260', 0.034);
+        for (let row = 5; row >= 0; row--) {
+          const depth = patch.tileLength * 0.125;
+          const near = start + patch.tileLength * (0.07 + row * 0.15);
+          for (let tooth = 0; tooth < patch.lanes * 2; tooth++) {
+            const x = left + (tooth + 0.5) * (right - left) / (patch.lanes * 2);
+            const point = [x, SPIKE_HEIGHT, near + depth * 0.55];
+            this.face([[x - 0.46, 0.04, near], [x + 0.46, 0.04, near], point], '#ef577f');
+            this.face([[x + 0.46, 0.04, near], [x + 0.37, 0.04, near + depth], point], '#9e3459');
+            this.face([[x - 0.46, 0.04, near], [x - 0.37, 0.04, near + depth], point], '#ff90a2');
+          }
+        }
+      }
+      this.ctx.globalAlpha = 1;
+    }
+
+    player(run, time, ready, dashing) {
+      const x = run.x;
+      const lift = run.height;
+      const stride = this.reduceMotion || run.airborne || ready ? 0 : Math.sin(run.time * 14);
+      const bob = this.reduceMotion || run.airborne ? 0 : ready ? Math.sin(time * 1.9) * 0.035 : Math.abs(stride) * 0.055;
+      const y = lift + bob;
+      const landingCue = run.tapOpen || (run.boosting && !dashing);
+      const ring = landingCue ? '#9bffe6' : dashing ? '#90d9ff' : '#c0a0ff';
+      const signal = landingCue ? '#65ffd7' : dashing ? '#a6e1ff' : '#ab82fa';
+      const overCut = run.obstacles.some((obstacle) => obstacle.type === 'gap' &&
+        obstacle.z < run.distance + 0.59 && obstacle.end > run.distance - 0.75 &&
+        Math.abs(laneX(obstacle.lane) - x) < LANE_WIDTH / 2 + 0.87);
+      if (!overCut) {
+        this.flat(x - .67, x + .67, -.49, .59, '#0e0a18a8', .032);
+        this.ctx.globalAlpha = landingCue || dashing ? 1 : 0.57;
+        this.line([[x - .65, .035, -.75], [x - .87, .035, -.35], [x - .87, .035, .38]], ring, 2);
+        this.line([[x + .65, .035, -.75], [x + .87, .035, -.35], [x + .87, .035, .38]], ring, 2);
+        this.ctx.globalAlpha = 1;
+      }
+
+      if (!this.reduceMotion && (dashing || run.boosting)) {
+        const trail = dashing ? '#56b6ffad' : '#6fffd37d';
+        const core = dashing ? '#cfedff' : '#b9ffea';
+        const length = dashing ? 6.1 : 4.1;
+        for (const side of [-1, 1]) {
+          const end = [x + side * 1.15, y + .36, -length];
+          this.face([[x + side * .57, y + 1.24, 0], [x + side * .73, y + .92, 0], end], trail);
+          this.line([[x + side * .66, y + 1.09, 0], [x + side * .92, y + .71, -length * .65]], core, dashing ? 3.2 : 2.2);
+        }
+      }
+
+      for (const side of [-1, 1]) {
+        const legX = x + side * .25;
+        const step = side * stride;
+        const footZ = step * .37 + (run.airborne && side > 0 ? .19 : 0);
+        const footY = y + Math.max(0, step) * .16 + (run.airborne ? .09 : 0);
+        this.box(legX, footY, footZ, .43, .22, .65, violet);
+        this.box(legX, footY + .22, footZ, .4, .46, .53, suit);
+      }
+      this.box(x, y + .64, 0, .93, .79, .66, violet);
+      for (const side of [-1, 1]) {
+        const armZ = side * stride * -.30;
+        const armY = y + .67 + (run.airborne ? .13 : 0);
+        this.box(x + side * .63, armY, armZ, .30, .55, .43, suit);
+        this.box(x + side * .63, armY + .53, armZ, .36, .20, .49, steel);
+      }
+      this.box(x, y + .83, -.38, .53, .52, .23, suit);
+      this.box(x, y + 1.13, -.505, .3, .10, .026, [signal, signal, signal]);
+      this.box(x, y + 1.42, .015, .68, .65, .67, steel);
+      this.box(x, y + 1.58, -.328, .56, .19, .035, ['#8966c3', '#221735', '#8463b3']);
+      this.box(x, y + 1.65, -.349, .46, .042, .01, [signal, signal, signal]);
+    }
+
+    drawParticles(dt, distance) {
+      for (const particle of this.particles) {
+        particle.life -= dt;
+        if (particle.life <= 0) continue;
+        particle.x += particle.vx * dt;
+        particle.y = Math.max(0.02, particle.y + particle.vy * dt);
+        particle.z += particle.vz * dt;
+        particle.vy -= 7 * dt;
+        this.ctx.globalAlpha = Math.min(1, particle.life * 2.7);
+        const color = particle.color;
+        this.box(particle.x, particle.y, particle.z - distance, particle.size, particle.size,
+          particle.size, [color, color, color]);
+      }
+      this.ctx.globalAlpha = 1;
+      this.particles = this.particles.filter((particle) => particle.life > 0);
+    }
+
+    updateSpeed(run, dt, mode) {
+      if (this.reduceMotion) return;
+      const desired = speedWidening(mode === 'ended' ? START_SPEED : run.speed);
+      const response = desired > this.widening ? 0.14 : 0.32;
+      this.widening = mode === 'ready' ? desired : desired + (this.widening - desired) * Math.exp(-dt / response);
+      const baseRush = (run.baseSpeed - START_SPEED) / (MAX_SPEED - START_SPEED) * 0.28;
+      const boostRush = (run.boosting ? 0.72 : 0) + (run.dashing ? 1 : 0);
+      const target = mode === 'running' ? Math.min(1, baseRush + boostRush) : 0;
+      this.rush = target + (this.rush - target) * Math.exp(-dt * (target > this.rush ? 15 : 9));
+      this.speedPulse *= Math.exp(-dt * 5.5);
+      this.speedTravel += dt * (0.55 + run.speed * 0.032);
+    }
+
+    drawSpeed(run) {
+      const intensity = Math.min(1, this.rush + this.speedPulse * 0.40);
+      if (intensity < 0.03) return;
+      const { ctx, width, height, centerX, horizon } = this;
+      const tint = run.boosting ? '112, 255, 212' : '191, 135, 255';
+      const core = run.boosting ? '226, 255, 247' : '245, 226, 255';
+      const originY = horizon + height * 0.07;
+      const edge = ctx.createRadialGradient(centerX, originY, Math.min(width, height) * 0.31,
+        centerX, originY, Math.hypot(width * 0.54, height * 0.65));
+      edge.addColorStop(0, `rgba(${tint}, 0)`);
+      edge.addColorStop(1, `rgba(${tint}, ${intensity * 0.17 + this.speedPulse * 0.2})`);
+      ctx.fillStyle = edge;
+      ctx.fillRect(0, 0, width, height);
+
+      for (const line of this.speedLines) {
+        const phase = (line.offset + this.speedTravel * line.pace) % 1;
+        const start = 0.35 + phase * 0.86;
+        const end = start + (0.046 + intensity * 0.23) * line.size;
+        const dx = line.x * width * 0.67;
+        const dy = line.y * height * 0.94;
+        const opacity = intensity * Math.min(phase * 7, (1 - phase) * 6, 1) * line.size;
+        ctx.beginPath();
+        ctx.moveTo(centerX + dx * start, originY + dy * start);
+        ctx.lineTo(centerX + dx * end, originY + dy * end);
+        ctx.lineWidth = 1.5 + intensity * line.size * 4;
+        ctx.strokeStyle = `rgba(${tint}, ${opacity * 0.26})`;
+        ctx.stroke();
+
+        const coreStart = end - (end - start) * 0.66;
+        ctx.beginPath();
+        ctx.moveTo(centerX + dx * coreStart, originY + dy * coreStart);
+        ctx.lineTo(centerX + dx * end, originY + dy * end);
+        ctx.lineWidth = 0.7 + intensity * line.size * 1.5;
+        ctx.strokeStyle = `rgba(${core}, ${opacity * 0.92})`;
+        ctx.stroke();
+      }
+    }
+
+    drawDash() {
+      const { ctx, width, height } = this;
+      // Keep the dash effect inside the outer gutters so obstacles stay readable.
+      const gutter = width * 0.14;
+      for (const side of [-1, 1]) {
+        const edge = side < 0 ? 0 : width;
+        const inward = -side;
+        const glow = ctx.createLinearGradient(edge, 0, edge + inward * gutter, 0);
+        glow.addColorStop(0, '#4c9fff63');
+        glow.addColorStop(1, '#4c9fff00');
+        ctx.fillStyle = glow;
+        ctx.fillRect(side < 0 ? 0 : width - gutter, 0, gutter, height);
+
+        for (let index = 0; index < 5; index++) {
+          const phase = (this.speedTravel * 0.8 + (index + 0.18) / 5) % 1;
+          const near = edge + inward * gutter * (0.95 - phase * 0.36);
+          const far = near - inward * gutter * (0.23 + phase * 0.40);
+          const y = height * (0.20 + phase * 0.66);
+          const endY = y + height * (0.026 + phase * 0.048);
+          const opacity = Math.min(phase * 7, (1 - phase) * 7, 1);
+          ctx.beginPath();
+          ctx.moveTo(near, y);
+          ctx.lineTo(far, endY);
+          ctx.lineTo(far, endY + height * (0.009 + phase * 0.012));
+          ctx.closePath();
+          ctx.fillStyle = `rgba(77, 166, 255, ${opacity * 0.58})`;
+          ctx.fill();
+
+          ctx.beginPath();
+          ctx.moveTo(near, y);
+          ctx.lineTo(far, endY);
+          ctx.lineWidth = 1.5 + phase * 2.8;
+          ctx.strokeStyle = `rgba(195, 230, 255, ${opacity * 0.93})`;
+          ctx.stroke();
+        }
+      }
+    }
+
+    frameCamera(run) {
+      const { width, height } = this;
+      const [left, top, right, bottom] = this.insets;
+      const usableWidth = Math.max(1, width - left - right);
+      const usableHeight = Math.max(1, height - top - bottom);
+      const short = width > height && usableHeight <= 500;
+      const compact = short || usableWidth <= 760 || usableWidth < usableHeight;
+      this.cameraBack = 10.8;
+      this.cameraY = 5.35;
+      this.centerX = left + usableWidth * (compact ? 0.5 : 0.5 + 0.185 * this.openingBlend);
+      this.centerY = top + usableHeight * (short ? 0.47 : compact ? 0.54 : 0.56);
+      const heightLimit = usableHeight * (short ? 0.88 : 1.12);
+      const baseFocal = Math.min(usableWidth * 0.8, heightLimit);
+      // Limit lateral follow at the nearest playable rails, using the narrowest field of view.
+      const railDepth = (this.cameraBack - 1) * COS + this.cameraY * SIN;
+      const followLimit = Math.max(0, (usableWidth / 2 - 4) * railDepth / baseFocal - (ROAD_HALF + 0.2));
+      const follow = Math.max(-followLimit, Math.min(followLimit, run.x * 0.22));
+      this.cameraX = compact ? 0 : -1.18 * this.openingBlend + follow;
+      this.focal = baseFocal * (1 - this.widening * (compact ? 0.8 : 1));
+      this.horizon = this.centerY - this.focal * SIN / COS;
+    }
+
+    draw(run, time, dt, mode) {
+      const ready = mode === 'ready';
+      const dashing = mode === 'running' && run.dashing;
+      this.updateSpeed(run, dt, mode);
+      this.openingBlend = ready ? 1 : this.openingBlend * Math.exp(-dt * 8);
+      this.frameCamera(run);
+
+      this.sky(this.reduceMotion ? 0 : time);
+      this.deepVoid(run.distance);
+      this.track(run, ready);
+      for (const obstacle of run.obstacles) {
+        if (obstacle.type === 'spikes') this.spikes(obstacle, run.distance);
+      }
+      const visible = run.obstacles.filter((obstacle) => obstacles[obstacle.type] &&
+        obstacle.z - run.distance >= -3 && obstacle.z - run.distance < 165);
+      let playerDrawn = false;
+      for (const obstacle of visible.reverse()) {
+        const z = obstacle.z - run.distance;
+        if (z < 0 && !playerDrawn) {
+          this.player(run, time, ready, dashing);
+          playerDrawn = true;
+        }
+        this.ctx.globalAlpha = Math.min(1, (185 - z) / 112);
+        const x = laneX(obstacle.lane);
+        const halfWidth = obstacles[obstacle.type].halfWidth;
+        if (halfWidth) this.flat(x - halfWidth - 0.11, x + halfWidth + 0.11, z - 0.63, z + 0.54, '#130b20b5', .028);
+        this[obstacle.type](x, z);
+        this.ctx.globalAlpha = 1;
+      }
+      if (!playerDrawn) this.player(run, time, ready, dashing);
+      this.drawParticles(dt, run.distance);
+      if (mode === 'running' && !this.reduceMotion) {
+        if (dashing) this.drawDash();
+        else this.drawSpeed(run);
+      }
+    }
+  }
+
+  globalThis.VoidScene = Scene;
+})();

@@ -137,8 +137,9 @@
     const darkening = death !== null && death.elapsed >= DEATH_DARKEN;
     const shadeHidden = !darkening && (mode !== 'ended' || replay !== null);
     if (deathShade.hidden !== shadeHidden) deathShade.hidden = shadeHidden;
-    const shadeOpacity = darkening && !reducedMotion.matches ?
+    const shadeProgress = darkening && !reducedMotion.matches ?
       Math.min(1, (death.elapsed - DEATH_DARKEN) / (DEATH_ECHO - DEATH_DARKEN)) : 1;
+    const shadeOpacity = shadeProgress ** 2 * (3 - 2 * shadeProgress);
     if (deathShade.style.opacity !== String(shadeOpacity)) deathShade.style.opacity = String(shadeOpacity);
     const echo = death?.revealed && !death.steady && !reducedMotion.matches;
     const offset = echo ? 2 * (DEATH_REVEAL - death.elapsed) / (DEATH_REVEAL - DEATH_ECHO) : 0;
@@ -829,9 +830,14 @@
     }
     updatePresentation();
     updateHud();
-    const visualDelta = death ? 0 : Math.min(elapsed, 0.1);
+    const frozen = death || (mode === 'ended' && !replay);
+    const visualDelta = frozen ? 0 : Math.min(elapsed, 0.1);
     sceneTime += visualDelta;
     scene.draw(run, sceneTime, visualDelta, mode, death?.sceneClue ?? latestClue(), signal, death);
+    if (death?.revealed && Number.isFinite(scene.horizon)) {
+      const bottom = `calc(100% - ${Math.floor(scene.horizon) - 8}px)`;
+      if (deathThought.style.bottom !== bottom) deathThought.style.bottom = bottom;
+    }
     requestAnimationFrame(frame);
   }
   replayButtons.forEach((button, index) => button.addEventListener('click', (event) => toggleReplay(event, index + 1)));

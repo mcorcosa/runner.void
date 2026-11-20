@@ -74,6 +74,7 @@ function browser(query = '?seed=187', store = storage(), {
   let starDiscovered;
   let starSignal;
   let sceneFrame;
+  let sceneHorizon = 135.5;
   const audio = [];
   let player;
   const context = vm.createContext({
@@ -94,6 +95,7 @@ function browser(query = '?seed=187', store = storage(), {
       scatter(kind) { events.push(['scatter', kind]); }
       pulseSpeed() {}
       draw(currentRun, time, dt, mode, discovered, signal, death) {
+        this.horizon = sceneHorizon;
         run = currentRun;
         starDiscovered = discovered;
         starSignal = signal;
@@ -128,6 +130,7 @@ function browser(query = '?seed=187', store = storage(), {
     get starDiscovered() { return starDiscovered; },
     get starSignal() { return starSignal; },
     get sceneFrame() { return sceneFrame; },
+    setSceneHorizon(value) { sceneHorizon = value; },
     get sound() { return audio.at(-1); },
     click(id, options) {
       const button = elements[id];
@@ -440,6 +443,7 @@ test('death freezes the impact frame, keeps controls locked and gives the though
   assert.equal(death.elapsed, beforeHidden);
   page.step(1, 8000);
   assert.equal(thought.textContent, 'A voice in all that hiss?');
+  assert.equal(thought.style.bottom, 'calc(100% - 127px)');
   const openingShadow = thought.style.textShadow;
   assert.match(openingShadow, /#a575f4/);
   assert.equal(shade.style.opacity, '1');
@@ -447,9 +451,11 @@ test('death freezes the impact frame, keeps controls locked and gives the though
   assert.equal(page.sound.transmissionTime, null);
   assert.equal(page.sceneFrame.time, time);
   assert.equal(results.hidden, true);
+  page.setSceneHorizon(112.75);
   page.step(1, 90);
   assert.notEqual(thought.style.textShadow, openingShadow);
   assert.ok(thought.style.textShadow);
+  assert.equal(thought.style.bottom, 'calc(100% - 104px)');
   page.step(1, 100);
   assert.equal(thought.style.textShadow, '');
 
@@ -470,6 +476,8 @@ test('death freezes the impact frame, keeps controls locked and gives the though
   assert.equal(shade.hidden, false);
   assert.equal(results.hidden, false);
   assert.equal(page.sceneFrame.death, null);
+  assert.equal(page.sceneFrame.time, time);
+  assert.equal(page.sceneFrame.dt, 0);
   assert.equal(page.elements.hud.inert, false);
   assert.equal(page.document.activeElement, page.elements.restart);
   assert.equal(page.elements['replay-1'].hidden, false);
@@ -624,8 +632,11 @@ test('preview is repeatable, live, and independent of personal progress and scri
 test('audio unlock precedes fullscreen and focused replay or mute retains native activation', () => {
   const store = storage({ meters: 500, status: 'discovered' });
   const page = browser(undefined, store);
+  const shade = page.elements['death-shade'];
+  assert.equal(shade.hidden, true);
   page.elements.game.requestFullscreen = () => page.events.push(['fullscreen']);
   page.click('start', { pointerType: 'touch' });
+  assert.equal(shade.hidden, true);
   assert.deepEqual(page.events.slice(0, 2), [['unlock'], ['fullscreen']]);
 
   assert.equal(page.key('Space', 'mute'), false);
@@ -636,9 +647,12 @@ test('audio unlock precedes fullscreen and focused replay or mute retains native
   page.until(() => page.mode === 'ended');
   const persisted = store.read();
   const ended = page.run;
+  const frozenTime = page.sceneFrame.time;
+  assert.equal(shade.hidden, false);
 
   assert.equal(page.key('Enter', 'replay-1'), false);
   page.click('replay-1');
+  assert.equal(shade.hidden, true);
   assert.equal(page.elements['replay-1'].textContent, 'Stop clue 1');
   assert.equal(page.key('Enter', 'replay-1', true), true);
   page.step(30);
@@ -646,6 +660,7 @@ test('audio unlock precedes fullscreen and focused replay or mute retains native
   assert.equal(page.sound.mode, 'ended');
   assert.equal(page.sound.musicTierFloor, 2);
   assert.ok(page.sound.transmissionTime > 0);
+  assert.ok(page.sceneFrame.time > frozenTime);
   page.setHidden(true);
   const pausedAt = page.sound.transmissionTime;
   page.step(2, 30_000);
@@ -654,6 +669,8 @@ test('audio unlock precedes fullscreen and focused replay or mute retains native
   page.step();
   assert.equal(page.sound.transmissionTime, pausedAt);
   page.until(() => page.sound.transmissionTime === null);
+  assert.equal(shade.hidden, false);
+  assert.equal(page.sceneFrame.dt, 0);
   assert.equal(page.elements['replay-1'].textContent, 'Replay clue 1');
   assert.equal(page.run, ended);
   assert.equal(500 + page.run.distance, persisted.meters);
@@ -661,12 +678,17 @@ test('audio unlock precedes fullscreen and focused replay or mute retains native
 
   assert.equal(page.key('Space', 'replay-1'), false);
   page.click('replay-1');
+  assert.equal(shade.hidden, true);
+  page.click('replay-1');
+  assert.equal(shade.hidden, false);
+  page.click('replay-1');
   page.click('restart');
   page.step();
   assert.equal(page.mode, 'running');
   assert.equal(page.sound.transmissionTime, null);
   assert.notEqual(page.run, ended);
   assert.equal(page.run.distance, 0);
+  assert.equal(shade.hidden, true);
   assert.deepEqual(store.read(), persisted);
 });
 
@@ -756,6 +778,7 @@ test('stacked cues finish live with a returning hazard between them and keep the
     page.until(() => page.sound.transmissionTime >= PULSE_LEAD);
     assert.equal(page.document.body.dataset.signalNoise, 'true');
     assert.equal(page.document.body.dataset.signalInvert, ordinal === 4 ? 'true' : 'false');
+    assert.equal(page.elements['death-shade'].hidden, true);
     assert.equal(page.elements['sky-signal'].textContent, clue.line);
     assert.equal(store.progress().discoveredClues, index);
     page.until(() => page.run.transmission?.phase === 'complete');
@@ -1283,6 +1306,7 @@ test('reset at results stops the active replay and clears the scene and launch p
   page.click('replay-4');
   page.until(() => page.sound.transmissionTime > PULSE_LEAD);
   assert.equal(page.document.body.dataset.signalInvert, 'true');
+  assert.equal(page.elements['death-shade'].hidden, true);
   assert.equal(page.starDiscovered, 4);
   assert.equal(page.key('Enter', 'reset-results-clues'), false);
   assert.equal(page.key('Space', 'reset-results-clues'), false);
@@ -1290,6 +1314,7 @@ test('reset at results stops the active replay and clears the scene and launch p
   page.click('reset-results-clues');
   page.step();
   assert.equal(page.mode, 'ready');
+  assert.equal(page.elements['death-shade'].hidden, true);
   assert.equal(page.document.activeElement, page.elements.start);
   assert.equal(page.elements['clue-reset-status'].textContent, 'Clue progress reset.');
   assert.equal(page.elements.recordings.hidden, true);

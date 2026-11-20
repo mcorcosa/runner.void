@@ -107,21 +107,45 @@ body[data-signal-invert="true"] .signal-noise {
 
 .death-shade, .death-thought {
   position: absolute;
-  inset: 0;
-  z-index: 3;
   pointer-events: none;
 }
-.death-shade { background: #090711; }
-body[data-mode="ended"] .death-shade { z-index: -1; }
+.death-shade {
+  inset: 0;
+  z-index: -1;
+  background: radial-gradient(ellipse at 50% 46%, #416fa21a, #12274118 62%, #040a1466);
+  -webkit-backdrop-filter: saturate(.18) brightness(.94);
+  backdrop-filter: saturate(.18) brightness(.94);
+}
 .death-thought {
+  z-index: 3;
+  top: calc(var(--safe-top) + var(--hud-height) + 6px);
+  right: var(--gutter-right);
+  bottom: 60%;
+  left: var(--gutter-left);
   display: grid;
+  grid-template-rows: minmax(0, 3fr) auto minmax(0, 1fr);
   place-items: center;
-  margin: 0;
-  padding: max(16px, var(--safe-top)) var(--gutter-right) max(16px, var(--safe-bottom)) var(--gutter-left);
+  max-width: 29ch;
+  margin: 0 auto;
   color: #f6f1ff;
-  font: 700 clamp(18px, 3.2vmin, 30px)/1.35 var(--mono);
+  font: 700 clamp(1.125rem, 3.2vmin, 1.875rem)/1.3 var(--mono);
   text-align: center;
   text-wrap: balance;
+  -webkit-text-stroke: 2px #090a13;
+  paint-order: stroke fill;
+}
+.death-thought::before, .death-thought::after { content: ''; }
+@media (orientation: landscape) and (max-height: 500px) {
+  .death-thought {
+    /* Keep the centered measure unless a wide line reaches Relay Nine's side of the sky. */
+    --thought-right: calc(var(--safe-left) + .725 * (100vw - var(--safe-left) - var(--safe-right)));
+    left: 50%;
+    right: auto;
+    width: max-content;
+    max-width: calc(var(--thought-right) - var(--gutter-left));
+    margin: 0;
+    transform: translateX(min(-50%, calc(var(--thought-right) - 50vw - 100%)));
+  }
 }
 
 .hud {
@@ -434,6 +458,7 @@ body[data-touch="true"] .feedback {
   padding: calc(var(--safe-top) + 54px) var(--gutter-right) calc(var(--safe-bottom) + 20px) var(--gutter-left);
   background: #090612a8;
 }
+.death-shade:not([hidden]) ~ .results { background: #09061250; }
 body[data-mode="ended"]:is([data-signal="1"], [data-signal="2"], [data-signal="3"], [data-signal="4"]) .results {
   background: #09061263;
 }

@@ -9,6 +9,7 @@
   const { PULSE_LEAD } = globalThis.VoidEpisode;
   const ROAD_HALF = LANE_WIDTH * LANE_COUNT / 2;
   const TILE = 6;
+  const RUNWAY_RANGE_MULTIPLIER = 16;
   const FAR_TILES = 36;
   const MARKING_TILES = 24;
   const REFLECTOR_SPACING = 10;
@@ -33,6 +34,7 @@
   const railMount = ['#dec6fb', '#594373', '#3d2e55'];
   const platformPalette = ['#465d79', '#294053', '#2d435d', '#9be1db'];
   const gatePalette = ['#774252', '#653241', '#4d2c45', '#ffa48e'];
+  const runwayColors = { deck: '#261b38', lane: '#302248', guide: '#61477d', rail: '#583888', railLight: '#a77cf9' };
 
   const deathPalettes = {
     hurdle: ['#ffe1a8', '#ffad65', '#9b492d', '#472638'],
@@ -503,13 +505,18 @@
       const { distance } = run;
       const farEnd = distance + this.viewDistance;
       const nearStart = distance - this.rearViewDistance;
+      const runwayEnd = distance + this.viewDistance * RUNWAY_RANGE_MULTIPLIER;
       const length = farEnd - nearStart;
       const stride = TILE * levelOfDetail(length, TILE, FAR_TILES);
-      const gaps = run.obstacles.filter(({ type, z, end }) => type === 'gap' && z < farEnd && end > nearStart);
+      const runwayGaps = run.obstacles.filter(({ type, z, end }) => type === 'gap' && z < runwayEnd && end > nearStart);
+      const gaps = runwayGaps.filter(({ z }) => z < farEnd);
       const selected = ready ? -1 : run.lane;
-      for (let tile = Math.ceil(farEnd / stride) - 1; (tile + 1) * stride > nearStart; tile--) {
+      const last = Math.ceil(farEnd / stride) - 1;
+      // Join distant spans to the last ordinary tile so the deck and guides have no painted seam.
+      this.trackTile(distance, runwayGaps, selected, Math.max(nearStart, last * stride), farEnd, runwayEnd);
+      for (let tile = last - 1; (tile + 1) * stride > nearStart; tile--) {
         const z = tile * stride;
-        this.trackTile(distance, gaps, selected, Math.max(nearStart, z), Math.min(farEnd, z + stride));
+        this.trackTile(distance, gaps, selected, Math.max(nearStart, z), z + stride);
       }
 
       // Markings crossfade between world-anchored grids while the solid deck keeps its exact boundaries.
@@ -618,22 +625,41 @@
       this.ctx.globalAlpha = 1;
     }
 
-    trackTile(distance, gaps, selected, start, end) {
+    runwayPaint(end) {
+      const [, edge] = this.screenPoint(this.viewPoint([0, 0, end]));
+      const paint = {};
+      for (const [part, color] of Object.entries(runwayColors)) {
+        const fade = this.ctx.createLinearGradient(0, this.horizon, 0, edge);
+        fade.addColorStop(0, color + '00');
+        fade.addColorStop(.13, color + '73');
+        fade.addColorStop(.35, color + 'd9');
+        fade.addColorStop(.70, color + 'f4');
+        fade.addColorStop(1, color);
+        paint[part] = fade;
+      }
+      return paint;
+    }
+
+    trackTile(distance, gaps, selected, start, end, runwayEnd = end) {
       const near = start - distance;
       const dust = Math.min(1, Math.max(0.22, (210 - this.projectedDepth(near)) / 145));
+      const paint = runwayEnd > end ? this.runwayPaint(end - distance) : runwayColors;
       // Compare against the open deck immediately beyond the tile's far edge.
       let fartherMask = 0;
       for (const gap of gaps) {
-        if (gap.z <= end && gap.end > end) fartherMask |= gapLaneMask(gap);
+        if (gap.z <= runwayEnd && gap.end > runwayEnd) fartherMask |= gapLaneMask(gap);
       }
-      for (const span of deckSpans(start, end, gaps)) {
+      for (const span of deckSpans(start, runwayEnd, gaps)) {
         const opened = span.mask & ~fartherMask;
-        this.ctx.globalAlpha = Math.max(0.48, dust);
-        for (let lane = 0; opened && lane < LANE_COUNT; lane++) {
-          if (laneMissing(opened, lane)) this.cutLip(laneX(lane), span.end - distance);
+        if (opened && span.end <= end) {
+          this.ctx.globalAlpha = Math.max(0.48, dust);
+          for (let lane = 0; lane < LANE_COUNT; lane++) {
+            if (laneMissing(opened, lane)) this.cutLip(laneX(lane), span.end - distance);
+          }
         }
         this.ctx.globalAlpha = dust;
-        this.deckSection(span.start - distance, span.end - distance, selected, span.mask);
+        this.deckSection(span.start - distance, span.end - distance, selected, span.mask,
+          Math.min(span.end, end) - distance, paint);
         fartherMask = span.mask;
       }
     }
@@ -676,43 +702,43 @@
       }
     }
 
-    deckSection(near, far, selected, mask) {
+    deckSection(near, far, selected, mask, detailEnd, paint) {
       const half = LANE_WIDTH / 2;
-      for (let lane = 1; mask && lane < LANE_COUNT; lane++) {
+      for (let lane = 1; near < detailEnd && mask && lane < LANE_COUNT; lane++) {
         if (laneMissing(mask, lane - 1) !== laneMissing(mask, lane)) {
-          this.cutWall(-ROAD_HALF + lane * LANE_WIDTH, near, far);
+          this.cutWall(-ROAD_HALF + lane * LANE_WIDTH, near, detailEnd);
         }
       }
       for (const [left, right] of deckSurfaces(mask)) {
-        this.flat(left, right, near, far, '#261b38');
+        this.flat(left, right, near, far, paint.deck);
       }
       if (selected >= 0 && !laneMissing(mask, selected)) {
         const x = laneX(selected);
-        this.flat(x - half + 0.045, x + half - 0.045, near, far, '#302248', 0.012);
+        this.flat(x - half + 0.045, x + half - 0.045, near, far, paint.lane, 0.012);
       }
-      for (let lane = 1; mask && lane < LANE_COUNT; lane++) {
+      for (let lane = 1; near < detailEnd && mask && lane < LANE_COUNT; lane++) {
         const missingLeft = laneMissing(mask, lane - 1);
         if (missingLeft === laneMissing(mask, lane)) continue;
         const edge = -ROAD_HALF + lane * LANE_WIDTH;
-        this.flat(edge - (missingLeft ? 0 : 0.16), edge + (missingLeft ? 0.16 : 0), near, far, '#929ec1', 0.025);
+        this.flat(edge - (missingLeft ? 0 : 0.16), edge + (missingLeft ? 0.16 : 0), near, detailEnd, '#929ec1', 0.025);
       }
-      this.laneMarks(near, far, mask, false);
+      this.laneMarks(near, far, mask, false, paint);
     }
 
-    laneMarks(near, far, mask, ticks) {
+    laneMarks(near, far, mask, ticks, paint = runwayColors) {
       for (let lane = 1; lane < LANE_COUNT; lane++) {
         if (laneMissing(mask, lane) || laneMissing(mask, lane - 1)) continue;
         const edge = -ROAD_HALF + lane * LANE_WIDTH;
         if (ticks) this.flat(edge - 0.018, edge + 0.018, near, far, '#9b77c7', 0.023);
-        else this.flat(edge - 0.025, edge + 0.025, near, far, '#61477d', 0.019);
+        else this.flat(edge - 0.025, edge + 0.025, near, far, paint.guide, 0.019);
       }
       for (const side of [-1, 1]) {
         if (laneMissing(mask, side < 0 ? 0 : LANE_COUNT - 1)) continue;
         const edge = side * ROAD_HALF;
         if (ticks) this.flat(edge - 0.064, edge + 0.064, near, far, '#dfbcff', 0.037);
         else {
-          this.flat(edge - 0.20, edge + 0.20, near, far, '#583888', 0.025);
-          this.flat(edge - 0.037, edge + 0.037, near, far, '#a77cf9', 0.032);
+          this.flat(edge - 0.20, edge + 0.20, near, far, paint.rail, 0.025);
+          this.flat(edge - 0.037, edge + 0.037, near, far, paint.railLight, 0.032);
         }
       }
     }

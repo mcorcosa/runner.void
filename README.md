@@ -11,7 +11,7 @@ For a phone on the same Wi-Fi network, run `python -m http.server 8000` from thi
 - **Down Arrow** or **S** slides under low gates and briefly slows the runner. Slide on the gate cue to stay low through the beam. Make a fresh press on the mint **Power slide now** cue for a speed boost on landing.
 - **W** or **X** dashes and can break one cracked purple barrier on contact in the lane your runner physically occupies. Jump first, then dash above long red spike patches to hold your height long enough to clear both tiles. Follow the **Jump now** and **Air dash now** cues.
 - Red warning triangles painted on the track mark gaps. Jump across a short gap or move around a long closure. You can cross a missing lane while airborne. Entering it on the ground or landing in it ends the run.
-- A crash ends the run at impact. A short animation and a thought in the sky lead to results after about 3.75 seconds with the game in view. System reduced motion shows a frozen silhouette specific to the hazard and steady text for the same reading time. Choose **Run again** or press **Enter** when results appear.
+- A crash ends the run at impact. After a short animation, a thought appears over the frozen track and sky in muted colors. Results follow over the same scene after about 3.75 seconds with the game in view. System reduced motion shows a frozen silhouette specific to the hazard and steady text for the same reading time. Choose **Run again** or press **Enter** from results.
 
 ### Touch controls
 

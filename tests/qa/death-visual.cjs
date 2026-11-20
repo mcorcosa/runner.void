@@ -18,6 +18,10 @@ const layouts = [
   { name: 'landscape', width: 844, height: 390, touch: true },
   { name: 'desktop', width: 960, height: 620, touch: false },
 ];
+const filterCases = {
+  portrait: { 48: { hazard: 'gap', reduced: false }, 720: { hazard: 'slideGate', reduced: true } },
+  landscape: { 48: { hazard: 'barrier', reduced: true }, 720: { hazard: 'gap', reduced: false } },
+};
 
 async function launch(profile) {
   const chromium = process.env.RUN_VOID_QA_CHROME ??
@@ -101,6 +105,18 @@ function playback() {
   let course;
   let current;
   let sheet;
+  const stagedThought = new URLSearchParams(location.search).has('qa-stage3');
+  if (stagedThought) {
+    Object.defineProperty(window, 'VoidEpisode', {
+      configurable: true,
+      set(api) {
+        localStorage.setItem(api.SAVE_KEY + ':v2:checkpoint', JSON.stringify({
+          version: 2, discoveredClues: 3, meters: api.CLUES[2].meters,
+        }));
+        Object.defineProperty(window, 'VoidEpisode', { value: api });
+      },
+    });
+  }
   window.requestAnimationFrame = (callback) => { request = callback; };
   Object.defineProperty(window, 'VoidRunner', {
     configurable: true,
@@ -109,6 +125,7 @@ function playback() {
         constructor(options) {
           super(options);
           if (!course) return;
+          if (stagedThought) this.obstacles.length = 0;
           const { type, speed } = course;
           this.baseSpeed = this.speed = speed;
           const seconds = 1.96;
@@ -169,6 +186,23 @@ function playback() {
       for (let limit = frame + 240; frame < limit && current.mode !== 'ended' && current.death.elapsed < seconds; ) step();
       return state();
     },
+    thoughtLayout() {
+      const thought = document.getElementById('death-thought');
+      const range = document.createRange();
+      range.selectNodeContents(thought);
+      const lines = [...range.getClientRects()];
+      const top = Math.min(...lines.map((line) => line.top));
+      const bottom = Math.max(...lines.map((line) => line.bottom));
+      const left = Math.min(...lines.map((line) => line.left));
+      const right = Math.max(...lines.map((line) => line.right));
+      return {
+        lineCount: lines.length,
+        fontSize: getComputedStyle(thought).fontSize,
+        hudClearance: Math.round(top - document.getElementById('hud').getBoundingClientRect().bottom),
+        horizonClearance: Math.round(current.scene.horizon - bottom),
+        centerOffset: Math.round((left + right - innerWidth) / 2),
+      };
+    },
     sheet(rows, times, title) {
       sheet = document.createElement('canvas');
       sheet.width = (tile.width + 8) * times.length + 8;
@@ -206,9 +240,12 @@ function playback() {
 
 async function main() {
   const flags = process.argv.slice(2);
-  assert.ok(flags.length === 0 || (flags.length === 1 && flags[0] === '--landscape'),
-    'Usage: node tests/qa/death-visual.cjs [--landscape]');
-  const selectedLayouts = flags.length ? layouts.filter(({ name }) => name === 'landscape') : layouts;
+  assert.ok(flags.length === 0 || (flags.length === 1 && ['--landscape', '--filter', '--thoughts'].includes(flags[0])),
+    'Usage: node tests/qa/death-visual.cjs [--landscape | --filter | --thoughts]');
+  const filter = flags[0] === '--filter';
+  const thoughts = flags[0] === '--thoughts';
+  const selectedLayouts = layouts.filter(({ name }) =>
+    filter ? name in filterCases : flags[0] !== '--landscape' || name === 'landscape');
   const output = await mkdtemp(join(tmpdir(), 'run-void-deaths-'));
   const profile = await mkdtemp(join(tmpdir(), 'run-void-death-chrome-'));
   const server = createServer(async (request, response) => {
@@ -237,6 +274,31 @@ async function main() {
       const { data } = await browser.call('Page.captureScreenshot', { format: 'png' });
       await save(name, data);
     };
+    const captureThought = async (layout, speed, hazard, long, large) => {
+      await browser.navigate(`${origin}/?seed=187&${long ? 'qa-stage3' : 'scenario=landing'}`);
+      const start = async () => {
+        const started = await evaluate('start', hazard, speed);
+        assert.equal(started.mode, 'dying', JSON.stringify(started));
+        assert.equal(started.type, hazard);
+      };
+      if (large) await browser.evaluate("document.documentElement.style.fontSize = '24px'");
+      if (long) {
+        await start();
+        assert.equal((await evaluate('finish', 3.85)).mode, 'ended');
+      }
+      await start();
+      const hold = await evaluate('finish', 3.15);
+      assert.equal(hold.thought, long ? 'How many times have they seen it?' : 'One white dot.');
+      assert.equal(hold.result, false);
+      const name = `${layout}-${speed}-${large ? 'large' : long ? 'long-standard' : 'standard'}-thought`;
+      await screenshot(name);
+      const placement = await evaluate('thoughtLayout');
+      assert.ok(placement.hudClearance >= 12 && placement.horizonClearance >= 12, JSON.stringify(placement));
+      assert.equal(placement.lineCount, large && layout !== 'landscape' ? 2 : 1);
+      if (large) assert.equal(placement.fontSize, '27px');
+      else assert.ok(Math.abs(placement.centerOffset) <= 1, JSON.stringify(placement));
+      console.log(name, placement);
+    };
     for (const { name: layout, width, height, touch } of selectedLayouts) {
       const angle = layout === 'landscape' ? 90 : 0;
       const type = layout === 'portrait' ? 'portraitPrimary' : 'landscapePrimary';
@@ -248,13 +310,22 @@ async function main() {
         await browser.call('Emulation.setEmulatedMedia', {
           features: [{ name: 'prefers-reduced-motion', value: reduced ? 'reduce' : 'no-preference' }],
         });
+        if (thoughts) {
+          const speed = reduced === (layout === 'portrait') ? 720 : 48;
+          const hazard = filterCases[layout]?.[speed].hazard ?? 'hurdle';
+          await captureThought(layout, speed, hazard, reduced, reduced);
+          if (layout === 'landscape' && !reduced) await captureThought(layout, speed, hazard, true, false);
+          continue;
+        }
         await browser.navigate(`${origin}/?scenario=landing&seed=187`);
         for (const speed of [48, 720]) {
+          const filterCase = filterCases[layout]?.[speed];
+          if (filter && reduced !== filterCase.reduced) continue;
+          const selectedHazards = filter ? [filterCase.hazard] : hazards;
           const name = `${layout}-${speed}-${reduced ? 'reduced' : 'motion'}`;
-          await evaluate('sheet', hazards, samples,
+          if (!filter) await evaluate('sheet', selectedHazards, samples,
             `${layout} ${width}×${height} / ${speed} m/s launch / ${reduced ? 'reduced motion' : 'full motion'}`);
-          for (let row = 0; row < hazards.length; row++) {
-            const hazard = hazards[row];
+          for (const [row, hazard] of selectedHazards.entries()) {
             const started = await evaluate('start', hazard, speed);
             assert.equal(started.mode, 'dying', JSON.stringify({ started, hazard, speed }));
             assert.equal(started.type, hazard);
@@ -265,16 +336,16 @@ async function main() {
               viewport: [width, height], canvas: [width, height], coarse: touch,
               short: layout === 'landscape', touch, reduced,
             });
-            const fullTimeline = !reduced && hazard === (layout === 'portrait' ? 'movingBarrier' : 'platform') &&
-              speed === (layout === 'portrait' ? 720 : 48);
-            const timelineFrame = (stage) => screenshot(`${layout}-timeline-${stage}`);
+            const fullTimeline = filter || (!reduced && hazard === (layout === 'portrait' ? 'movingBarrier' : 'platform') &&
+              speed === (layout === 'portrait' ? 720 : 48));
+            const timelineFrame = (stage) => screenshot(filter ? `${name}-${hazard}-${stage}` : `${layout}-timeline-${stage}`);
             for (let column = 0; column < samples.length; column++) {
               const state = await evaluate('finish', samples[column]);
               assert.equal(state.mode, 'dying');
               assert.equal(state.shadeHidden, true);
-              await evaluate('cell', row, column, `${hazard} · ${started.speed.toFixed(1)} m/s`);
+              if (!filter) await evaluate('cell', row, column, `${hazard} · ${started.speed.toFixed(1)} m/s`);
               if (fullTimeline && column === 1) await timelineFrame('impact');
-              if (layout === 'landscape' && speed === 720 && column === 2 &&
+              if (!filter && layout === 'landscape' && speed === 720 && column === 2 &&
                   ['movingBarrier', 'spikes', 'gap'].includes(hazard)) {
                 await screenshot(`${name}-full-${hazard}`);
               }
@@ -282,12 +353,13 @@ async function main() {
             if (fullTimeline) {
               const darkening = await evaluate('finish', 1.30);
               assert.equal(darkening.shadeHidden, false);
-              assert.ok(Number(darkening.shade) > 0 && Number(darkening.shade) < 1);
+              if (reduced) assert.equal(darkening.shade, '1');
+              else assert.ok(Number(darkening.shade) > 0 && Number(darkening.shade) < 1);
               assert.equal(darkening.thought, '');
-              await timelineFrame('darkening');
+              if (!filter || !reduced) await timelineFrame('darkening');
               const reveal = await evaluate('finish', 1.73);
               assert.ok(reveal.thought.trim());
-              await timelineFrame('lore');
+              if (!filter) await timelineFrame('lore');
               const hold = await evaluate('finish', 3.15);
               assert.equal(hold.thought, reveal.thought);
               assert.equal(hold.result, false);
@@ -298,7 +370,7 @@ async function main() {
             assert.equal(ended.result, true);
             if (fullTimeline) await timelineFrame('results');
           }
-          await save(name, await evaluate('png'));
+          if (!filter) await save(name, await evaluate('png'));
           console.log(name);
         }
       }

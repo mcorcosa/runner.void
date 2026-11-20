@@ -97,6 +97,74 @@ test('overlapping and wide gaps remove deck, rails and markings on every affecte
   ]);
 });
 
+test('distant runway paint joins the ordinary deck and respects the same gap geometry', () => {
+  for (const [speed, width, height, reduceMotion] of [
+    [48, 960, 620, false], [720, 844, 390, false], [100_000, 390, 844, true],
+  ]) {
+    const { scene, run } = fixture({ width, height, reduceMotion });
+    run.baseSpeed = run.speed = speed;
+    run.distance = 90_000;
+    scene.reset(speed);
+    scene.frameCamera(run);
+    const { viewDistance: range, horizon } = scene;
+    const world = (fraction) => run.distance + fraction * range;
+    const seam = world(1) - run.distance;
+    const cut = (start, end, lane, lanes) => run.addObstacle(world(start), lane, 'gap', { end: world(end), lanes });
+    cut(.82, 1.35, 0, 2);
+    cut(1.65, 2.8, 3, 2);
+    cut(.92, 1, 4, 1);
+    run.addObstacle(world(.84), 2, 'hurdle');
+    run.addObstacle(world(.96), 2, 'hurdle');
+    run.addObstacle(world(1.2), 2, 'hurdle');
+
+    const flats = [];
+    const cues = [];
+    const walls = [];
+    const lips = [];
+    const hurdles = [];
+    let paint;
+    const runwayPaint = scene.runwayPaint.bind(scene);
+    scene.runwayPaint = (end) => { paint = runwayPaint(end); return paint; };
+    scene.flat = (...args) => flats.push(args);
+    scene.gapWarning = (...args) => cues.push(args);
+    scene.cutWall = (...args) => walls.push(args);
+    scene.cutLip = (...args) => lips.push(args);
+    scene.hurdle = (...args) => hurdles.push(args);
+    scene.track(run, false);
+    scene.drawCourseObjects(run, 0, false, false, false);
+
+    const rail = laneX(4) + LANE_WIDTH / 2;
+    const contains = (color, x, fraction) => flats.some(([left, right, near, far, fill]) =>
+      fill === color && left < x && x < right && near < fraction * range && far > fraction * range);
+    assert.ok(flats.some(([left, right, near, far, fill]) =>
+      fill === paint.deck && left < 0 && right > 0 && near < range && far > range));
+    assert.ok(contains(paint.rail, -rail, 1.6));
+    assert.ok(contains(paint.rail, rail, 1.1));
+    assert.ok(contains(paint.guide, LANE_WIDTH / 2, 1.1));
+    for (const [fraction, lanes] of [[.95, [0, 1, 4]], [1.1, [0, 1]], [2, [3, 4]]]) {
+      for (let lane = 0; lane < 5; lane++) {
+        assert.equal(contains(paint.deck, laneX(lane), fraction) || contains('#261b38', laneX(lane), fraction),
+          !lanes.includes(lane));
+      }
+    }
+    assert.ok(!contains(paint.rail, -rail, 1.1));
+    assert.ok(!contains(paint.rail, rail, 2));
+    assert.ok(!contains(paint.guide, rail - LANE_WIDTH, 2));
+    assert.deepEqual(lips, [[laneX(4), seam]]);
+    assert.equal(cues.length, 3);
+    assert.ok(cues.every(([, entry]) => entry < range));
+    assert.ok(walls.every(([, , far]) => far <= seam));
+    assert.deepEqual(hurdles.map(([, z]) => z), [world(.84) - run.distance]);
+
+    const distantFlats = flats.filter(([, , , far]) => far > seam);
+    assert.ok(distantFlats.length <= 40);
+    const farthest = Math.max(...distantFlats.map(([, , , far]) => far));
+    const deckY = (z) => scene.screenPoint(scene.viewPoint([0, 0, z]))[1];
+    assert.ok(deckY(farthest) - horizon < (deckY(range) - horizon) * .08);
+    assert.equal(scene.horizon, horizon);
+  }
+});
+
 test('the authored platform has a landable top and the gate leaves standing-to-slide clearance visible', () => {
   const { scene, run } = fixture({ scenario: 'platform' });
   const platform = run.obstacles.find(({ type }) => type === 'platform');

@@ -5,7 +5,7 @@ const test = require('node:test');
 const vm = require('node:vm');
 const encounters = require('../encounters.js');
 const { Run, STEP, LANE_COUNT, LANE_WIDTH, START_SPEED, ENDLESS_START_SPEED, ADVANCED_START_SPEED, FAST_START_SPEED,
-  MAX_EXTRA_SPEED, REACTION_TIME, MIN_VIEW_DISTANCE, VIEW_SECONDS, SLIDE_DISTANCE, slideGateBounds, laneX,
+  MAX_EXTRA_SPEED, REACTION_TIME, VIEW_SECONDS, SLIDE_DISTANCE, slideGateBounds, laneX,
   obstacles } = require('../game.js');
 const { CLUES, SAVE_KEY } = require('../episode.js');
 
@@ -1957,9 +1957,11 @@ test('page wiring reports a collision, restarts with one button, and dashes with
 test('center and exterior closures draw a red warning triangle, deep walls and an empty deck', () => {
   const { Scene } = browserHarness('gap-edge');
   let stars = 0;
-  const ctx = { beginPath() {}, arc() { stars++; }, fill() {}, fillRect() {} };
-  const renderer = Object.assign(Object.create(Scene.prototype), { cameraBack: 10.8, ctx, particles: [] });
-  renderer.setViewDistance(MIN_VIEW_DISTANCE);
+  const ctx = { beginPath() {}, arc() { stars++; }, fill() {}, fillRect() {},
+    createLinearGradient: () => ({ addColorStop() {} }) };
+  const renderer = Object.assign(Object.create(Scene.prototype), {
+    width: 390, height: 844, insets: [0, 0, 0, 0], ctx, particles: [],
+  });
   const flats = [];
   const boxes = [];
   const faces = [];
@@ -1972,6 +1974,7 @@ test('center and exterior closures draw a red warning triangle, deep walls and a
   for (const scenario of ['gap', 'gap-edge']) {
     const run = new Run({ scenario });
     renderer.reset(run.speed);
+    renderer.frameCamera(run);
     const gap = run.obstacles.find((obstacle) => obstacle.type === 'gap');
     const middle = laneX(gap.lane);
     const left = middle - LANE_WIDTH / 2;

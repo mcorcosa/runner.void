@@ -6,7 +6,6 @@
   const TIER_TIMES = [0, 8, 24, 43, 65];
   const turns = [[1, -1], [1, 1], [2, -1], [2, 1], [3, -1], [3, 1]];
   const inward = [[1, 1], [3, -1]];
-  const histories = new WeakMap();
 
   function later(run, z, seconds) {
     return z + run.distanceIn(z, seconds);
@@ -174,11 +173,11 @@
 
   function placeEncounter(run, z) {
     if (!run.endless || run.closure || run.shortGapDue) return false;
-    const history = histories.get(run);
+    const history = run.encounterHistory;
     if (history && z < history.nextAt) return false;
 
-    const secondsAhead = 2 * (z - run.distance) / (run.baseSpeed + run.upperBaseAt(z));
-    const survivalTier = TIER_TIMES.findLastIndex((seconds) => run.time + secondsAhead >= seconds) + 1;
+    const arrivalTime = run.courseTimeAt(z);
+    const survivalTier = TIER_TIMES.findLastIndex((seconds) => arrivalTime >= seconds) + 1;
     const tier = Math.max(run.courseTierFloor, survivalTier);
     if (tier < 2) return false;
 
@@ -192,8 +191,8 @@
     const streak = (history?.streak ?? 0) + 1;
     const breakForStandard = streak >= 4 || (streak === 3 && run.random() < 0.55);
     const nextAt = breakForStandard ? later(run, end, 1.35 + run.random() * 0.72) : end;
-    histories.set(run, { tier, previous: section, remaining: remaining.filter((item) => item !== section),
-      nextAt, streak: breakForStandard ? 0 : streak });
+    run.encounterHistory = { tier, previous: section, remaining: remaining.filter((item) => item !== section),
+      nextAt, streak: breakForStandard ? 0 : streak };
     return true;
   }
 

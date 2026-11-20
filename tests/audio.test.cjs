@@ -1,6 +1,7 @@
 'use strict';
 
 const assert = require('node:assert/strict');
+const { createHash } = require('node:crypto');
 const { readFileSync } = require('node:fs');
 const { test } = require('node:test');
 const vm = require('node:vm');
@@ -21,6 +22,11 @@ const tracks = [
 const durations = new Map(tracks);
 const script = readFileSync(require.resolve('../audio.js'), 'utf8');
 const bundle = readFileSync(require.resolve('../audio/relay-nine.js'), 'utf8');
+const bundleDocument = { currentScript: {} };
+vm.runInNewContext(bundle, { document: bundleDocument });
+const recordings = bundleDocument.currentScript.recordings;
+const recordingKeys = new Map(Object.entries(recordings).map(([id, clip]) => [clip, Number(id)]));
+const recordingLengths = { 2: 6.8, 3: 8.8, 4: 10.8, 5: 7.8, 6: 7.8, 7: 8.8, 8: 7.8, 9: 9.8 };
 
 class Param {
   constructor(value) {
@@ -193,9 +199,9 @@ function setup(t, { ContextClass = Context, protocol = 'http:', random = () => 0
   return { sound, instances };
 }
 
-function setupSpoken(t, { protocol = 'http:', deferLoad = false, failLoad = false } = {}) {
+function setupSpoken(t, { protocol = 'http:', deferLoad = false, failLoad = false, failDecode } = {}) {
   const loads = [];
-  const decoded = [];
+  const decoded = new Map();
   const document = {
     currentScript: { src: protocol === 'file:' ? 'file:///C:/run.void/audio.js' : 'http://localhost/audio.js' },
     createElement: () => ({ remove() {} }),
@@ -205,8 +211,11 @@ function setupSpoken(t, { protocol = 'http:', deferLoad = false, failLoad = fals
     async decodeAudioData(data) {
       const bytes = Buffer.from(data);
       assert.equal(bytes.toString('ascii', 0, 3), 'ID3');
-      const buffer = { duration: [6.8, 8.8, 10.8][decoded.length], bytes: bytes.length };
-      decoded.push(buffer);
+      const key = recordingKeys.get(bytes.toString('base64'));
+      assert.ok(recordingLengths[key]);
+      if (key === failDecode) throw Error('unsupported audio');
+      const buffer = { duration: recordingLengths[key] };
+      decoded.set(key, buffer);
       return buffer;
     }
   }
@@ -258,7 +267,9 @@ test('loads through CommonJS and the browser global and behaves safely without a
   const sound = new sandbox.VoidAudio.Soundtrack();
   assert.equal(typeof Soundtrack, 'function');
   assert.equal(await sound.unlock(), false);
-  sound.update({ mode: 'running', speed: 570, transmissionTime: 1 });
+  sound.update({ mode: 'running', speed: 570, transmissionClue: 9, transmissionTime: 2 });
+  assert.equal(sound.transmission.elapsed, 2);
+  assert.equal(sound.transmission.missed, true);
   sound.impact('gap');
   assert.equal(sound.context, null);
   sound.setMuted(true);
@@ -1003,13 +1014,31 @@ test('the existing radio cue still generates a bounded eight-second mono signal'
   assert.ok(Math.abs(data.at(-1)) < 0.001);
 });
 
-for (const [clue, duration, protocol] of [[2, 8, 'http:'], [3, 10, 'http:'], [4, 12, 'file:']]) {
+test('the bundle maps eight distinct MP3s to stable IDs and preserves the original recordings', () => {
+  assert.deepEqual(Object.keys(recordings).map(Number), [2, 3, 4, 5, 6, 7, 8, 9]);
+  assert.equal(recordingKeys.size, 8);
+  const legacy = [
+    [2, 41420, 'ae0239a4db66ceb5c5ccdf94ff9e9b4c7482f570df2ddfe278cf6bde9c7de78e'],
+    [3, 53372, 'f1e1ca2e73d602f65e802aa14d5442ffe4b429dbd3af5edb4929c91472d14720'],
+    [4, 65324, 'cd50e19c2f144949da3916c2e8f035d69306340797e4aed51cab34bd80133826'],
+  ];
+  for (const [key, size, hash] of legacy) {
+    const bytes = Buffer.from(recordings[key], 'base64');
+    assert.equal(bytes.length, size);
+    assert.equal(createHash('sha256').update(bytes).digest('hex'), hash);
+  }
+});
+
+for (const [clue, duration, protocol] of [
+  [2, 8, 'http:'], [3, 10, 'http:'], [5, 9, 'http:'], [4, 12, 'file:'], [6, 9, 'http:'],
+  [7, 10, 'http:'], [8, 9, 'file:'], [9, 11, 'http:'],
+]) {
   test(`clue ${clue} uses its own recording after the pulse in live play and replay`, async t => {
     const { sound, decoded, loads, unlockSpoken } = setupSpoken(t, { protocol });
     await unlockSpoken();
     assert.equal(new URL(loads[0].src).protocol, protocol);
     assert.ok(loads[0].src.endsWith('/audio/relay-nine.js'));
-    assert.equal(new Set(decoded.map(buffer => buffer.bytes)).size, 3);
+    assert.equal(decoded.size, 8);
     let original;
     for (const mode of ['running', 'ended']) {
       const cue = { mode, transmissionClue: clue };
@@ -1025,7 +1054,7 @@ for (const [clue, duration, protocol] of [[2, 8, 'http:'], [3, 10, 'http:'], [4,
       const source = sound.radioVoice.source;
       assert.notEqual(source, original);
       original = source;
-      assert.equal(source.buffer, decoded[clue - 2]);
+      assert.equal(source.buffer, decoded.get(clue));
       assert.equal(source.playbackRate.value, 1);
       assert.equal(source.offset, 0);
       assert.ok(Math.abs(source.stopAt - source.startedAt - (duration - 1.2)) < 1e-7);
@@ -1045,14 +1074,19 @@ for (const [clue, duration, protocol] of [[2, 8, 'http:'], [3, 10, 'http:'], [4,
 test('spoken cue switches, mute, suspension, and restart keep a single cue clock', async t => {
   const { sound, decoded, unlockSpoken } = setupSpoken(t);
   await unlockSpoken();
-  sound.update({ mode: 'ended', transmissionClue: 2, transmissionTime: 1.8 });
-  const original = sound.radioVoice.source;
   sound.update({ mode: 'ended', transmissionClue: 3, transmissionTime: 1.8 });
+  const original = sound.radioVoice.source;
+  sound.update({ mode: 'ended', transmissionClue: 5, transmissionTime: 1.8 });
   const replacement = sound.radioVoice.source;
-  assert.equal(replacement.buffer, decoded[1]);
+  assert.equal(replacement.buffer, decoded.get(5));
+  assert.equal(sound.cutoff, 2100);
+  const patternLevel = sound.mix.level;
   assert.equal(replacement.startedAt, original.stopAt, 'retiring and replacement voices do not overlap');
   assert.ok(Math.abs(replacement.offset - 0.624) < 1e-7);
   sound.update({ mode: 'ended', transmissionClue: 4, transmissionTime: 1.8 });
+  assert.equal(sound.radioVoice.source.buffer, decoded.get(4));
+  assert.equal(sound.cutoff, 1800);
+  assert.ok(Math.abs(sound.mix.level / patternLevel - 0.8) < 1e-7);
   assert.equal(sound.radioVoice.source.startedAt, original.stopAt, 'cancel a queued voice without extending the delay');
   assert.ok(replacement.stopAt < replacement.startedAt);
   tick(sound, 0.12, { mode: 'ended', transmissionClue: 4, transmissionTime: 1.92 });
@@ -1076,6 +1110,58 @@ test('spoken cue switches, mute, suspension, and restart keep a single cue clock
   assert.equal(sound.transmission, null);
 });
 
+test('an explicit onset controls both music and radio, including zero and a changed onset', async t => {
+  const { sound, decoded, unlockSpoken } = setupSpoken(t);
+  await unlockSpoken();
+  const cue = { mode: 'running', transmissionClue: 6, transmissionDuration: 5, transmissionRadioAt: 2 };
+  sound.update({ ...cue, transmissionTime: 1.9 });
+  assert.equal(sound.radioVoice, null);
+  assert.equal(sound.mix.cue, null);
+  tick(sound, 0.1, { ...cue, transmissionTime: 2 });
+  assert.equal(sound.radioVoice.source.buffer, decoded.get(6));
+  assert.equal(sound.radioVoice.source.offset, 0);
+  assert.ok(Math.abs(sound.radioVoice.source.stopAt - sound.radioVoice.source.startedAt - 3) < 1e-7);
+  assert.equal(sound.mix.cue, 6);
+
+  sound.update({ ...cue, transmissionRadioAt: 0, transmissionTime: 2 });
+  assert.ok(Math.abs(sound.radioVoice.source.offset - 2.024) < 1e-7);
+  assert.equal(sound.transmission.radioAt, 0);
+  tick(sound, 0.1);
+  sound.update({ ...cue, transmissionRadioAt: 0, transmissionTime: 0 });
+  assert.equal(sound.radioVoice.source.buffer, decoded.get(6));
+  assert.ok(sound.radioVoice.source.offset < 0.025);
+  assert.equal(sound.mix.cue, 6);
+});
+
+test('the final transmission and recovery keep the forward score and add no stinger', async t => {
+  const { sound, unlockSpoken } = setupSpoken(t);
+  sound.update({ mode: 'running', speed: 1050, musicTierFloor: 5 });
+  await unlockSpoken();
+  const media = sound.media;
+  const song = sound.activeMusic;
+  const levelBefore = sound.mix.level;
+  const cue = { transmissionClue: 9 };
+  tick(sound, 10);
+  sound.update({ ...cue, transmissionTime: 0 });
+  tick(sound, 1.2, { ...cue, transmissionTime: 1.2 });
+  const entryPosition = media.currentTime;
+  tick(sound, 0.3, { ...cue, transmissionTime: 1.5 });
+  assert.equal(media.playbackRate, 0.72);
+  assert.equal(sound.mix.level, levelBefore * 0.40);
+  tick(sound, 9.4, { ...cue, transmissionTime: 10.9 });
+  assert.ok(media.currentTime > entryPosition);
+  const positionBeforeRelease = media.currentTime;
+  tick(sound, 0.1, { ...cue, transmissionTime: 11 });
+  tick(sound, 0.3);
+  assert.equal(sound.activeMusic, song);
+  assert.equal(media.loads.length, 1);
+  assert.equal(media.seeks.length, 0);
+  assert.ok(media.currentTime > positionBeforeRelease);
+  assert.equal(sound.mix.level, levelBefore);
+  assert.equal(media.playbackRate, 1);
+  assert.equal(sound.context.sources.length, 1);
+});
+
 for (const failLoad of [false, true]) {
   test(`${failLoad ? 'missing' : 'late'} recordings leave playback on the foreground clock`, async t => {
     const { sound, deliver, unlockSpoken } = setupSpoken(t, { deferLoad: true, failLoad });
@@ -1093,6 +1179,59 @@ for (const failLoad of [false, true]) {
     assert.equal(sound.radioVoice.source.buffer, sound.radioBuffer);
   });
 }
+
+test('a late new recording gives one static burst, keeps the score, and plays on the next replay', async t => {
+  const { sound, decoded, deliver, unlockSpoken } = setupSpoken(t, { deferLoad: true });
+  await unlockSpoken();
+  const cue = { mode: 'ended', transmissionClue: 9 };
+  sound.update({ ...cue, transmissionTime: 0 });
+  const song = sound.activeMusic;
+  tick(sound, 1.2, { ...cue, transmissionTime: 1.2 });
+  const fallback = sound.radioVoice.source;
+  assert.equal(fallback.buffer, sound.staticBuffer);
+  assert.equal(fallback.buffer.duration, 0.48);
+  const samples = fallback.buffer.getChannelData(0);
+  assert.ok(samples.some(sample => Math.abs(sample) > 0.06));
+  assert.ok(Math.abs(samples.at(-1)) < 0.001);
+  await deliver();
+  tick(sound, 0.6, { ...cue, transmissionTime: 1.8 });
+  assert.equal(sound.radioVoice, null);
+  assert.equal(sound.context.sources.length, 1, 'the late voice never joins the cue');
+  assert.equal(sound.media.playbackRate, 0.72);
+  assert.equal(sound.activeMusic, song);
+
+  sound.update({ ...cue, transmissionTime: 0 });
+  tick(sound, 1.2, { ...cue, transmissionTime: 1.2 });
+  assert.equal(sound.radioVoice.source.buffer, decoded.get(9));
+  assert.equal(sound.activeMusic, song);
+});
+
+test('a hidden onset or a failed decode cannot inject late speech or block the next cue', async t => {
+  const { sound, decoded, deliver, unlockSpoken } = setupSpoken(t, { deferLoad: true, failDecode: 7 });
+  await unlockSpoken();
+  const hidden = { mode: 'ended', transmissionClue: 8 };
+  await sound.suspend();
+  sound.update({ ...hidden, transmissionTime: 1.2 });
+  await deliver();
+  sound.update({ ...hidden, transmissionTime: 2.3 });
+  await sound.resume();
+  assert.equal(sound.transmission.elapsed, 2.3);
+  assert.equal(sound.radioVoice, null);
+
+  const failed = { ...hidden, transmissionClue: 7, transmissionRadioAt: 0 };
+  sound.setMuted(true);
+  sound.update({ ...failed, transmissionTime: 0 });
+  assert.equal(sound.radioVoice, null);
+  tick(sound, 0.2, { ...failed, transmissionTime: 0.2 });
+  sound.setMuted(false);
+  assert.equal(sound.radioVoice.source.buffer, sound.staticBuffer);
+  assert.equal(sound.radioVoice.source.offset, 0.2);
+  assert.equal(decoded.has(7), false);
+  tick(sound, 0.4, { ...failed, transmissionTime: 0.6 });
+  assert.equal(sound.radioVoice, null);
+  sound.update({ ...hidden, transmissionTime: 1.2 });
+  assert.equal(sound.radioVoice.source.buffer, decoded.get(8));
+});
 
 for (const [discoveredClues, speed, firstTrack] of [[2, 112, 4], [3, 144, 6], [4, 176, 8]]) {
   test(`the ${speed} m/s launch selects Tier ${discoveredClues + 1} and reuses a matching song`, async t => {

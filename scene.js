@@ -2,20 +2,22 @@
   'use strict';
 
   const {
-    LANE_WIDTH, LANE_COUNT, START_SPEED, MIN_VIEW_DISTANCE, SPIKE_HEIGHT,
+    LANE_WIDTH, LANE_COUNT, START_SPEED, MIN_VIEW_DISTANCE, RUNWAY_RANGE_MULTIPLIER, SPIKE_HEIGHT,
     PLATFORM_HEIGHT, PLATFORM_HALF_WIDTH, SLIDE_GATE_CLEARANCE, SLIDE_GATE_HEIGHT, SLIDE_GATE_HALF_WIDTH,
-    BLACK_HOLE_HALF_WIDTH, movingBarrierX, laneX, obstacles,
+    BLACK_HOLE_HALF_WIDTH, BLACK_HOLE_HALF_DEPTH, movingBarrierX, laneX, obstacles, boltPositionAt,
   } = globalThis.VoidRunner;
   const { PULSE_LEAD } = globalThis.VoidEpisode;
+  const MAX_PRESENTATION_STAGE = 4;
   const ROAD_HALF = LANE_WIDTH * LANE_COUNT / 2;
   const TILE = 6;
-  const RUNWAY_RANGE_MULTIPLIER = 16;
   const FAR_TILES = 36;
   const MARKING_TILES = 24;
   const REFLECTOR_SPACING = 10;
   const REFLECTOR_CADENCE = 5.5;
   const PACE_LINES = 16;
   const OBSTACLE_VIEW_FRACTION = 0.9;
+  const SIMPLE_OBSTACLE_FRACTION = 1.25;
+  const OBSTACLE_FOG = '#171225';
   const CUT_DEPTH = 2.15;
   const SLIDE_BURST_TIME = 0.36;
   const DASH_WAKE = 4.55;
@@ -68,6 +70,20 @@
 
   function easeOut(value) {
     return 1 - (1 - clamp(value, 0, 1)) ** 2;
+  }
+
+  function mixPaint(base, color, amount) {
+    if (amount >= 1) return color;
+    if (amount <= 0) return base;
+    const from = Number.parseInt(base.slice(1), 16);
+    const to = Number.parseInt(color.slice(1), 16);
+    let blended = 0;
+    for (const shift of [16, 8, 0]) {
+      const first = (from >> shift) & 255;
+      const last = (to >> shift) & 255;
+      blended |= Math.round(first + (last - first) * amount) << shift;
+    }
+    return `#${blended.toString(16).padStart(6, '0')}`;
   }
 
   function deathPose(type, time, direction) {
@@ -181,6 +197,7 @@
     constructor(canvas) {
       this.canvas = canvas;
       this.ctx = canvas.getContext('2d', { alpha: false });
+      this.obstacleLight = 1;
       this.stars = Array.from({ length: 125 }, (_, index) => ({
         x: repeatable(index * 3), y: repeatable(index * 3 + 1) * 0.86,
         light: repeatable(index * 3 + 2),
@@ -306,12 +323,17 @@
       ctx.beginPath();
       for (const [x, y] of view.map((point) => this.screenPoint(point))) ctx.lineTo(x, y);
       ctx.closePath();
-      ctx.fillStyle = color;
+      ctx.fillStyle = this.obstaclePaint(color);
       ctx.fill();
     }
 
     flat(x1, x2, near, far, color, y = 0) {
       this.face([[x1, y, near], [x2, y, near], [x2, y, far], [x1, y, far]], color);
+    }
+
+    obstaclePaint(color) {
+      return this.obstacleLight < 1 && typeof color === 'string' && color.length === 7 ?
+        mixPaint(OBSTACLE_FOG, color, this.obstacleLight) : color;
     }
 
     box(x, y, z, width, height, depth, [topColor, frontColor, sideColor]) {
@@ -335,12 +357,12 @@
       const { ctx } = this;
       ctx.beginPath();
       for (const [x, y] of view.map((point) => this.screenPoint(point))) ctx.lineTo(x, y);
-      ctx.strokeStyle = color;
+      ctx.strokeStyle = this.obstaclePaint(color);
       ctx.lineWidth = width;
       ctx.stroke();
     }
 
-    sky(time, latestClue, signal) {
+    sky(time, presentationStage, signal) {
       const { ctx, width, height, centerX, horizon } = this;
       const travel = this.reduceMotion ? 0 : this.speedTravel;
       const drift = this.reduceMotion ? 0 : this.cameraX;
@@ -417,19 +439,20 @@
         ctx.fillRect(-size / 2, -size / 2, size, 1);
         ctx.restore();
       }
-      this.relayNine(time, latestClue, signal);
+      this.relayNine(time, presentationStage, signal);
     }
 
-    relayNine(time, latestClue, signal) {
+    relayNine(time, presentationStage, signal) {
       const { ctx, width, height } = this;
       const [left, top, right, bottom] = this.insets;
       const x = left + (width - left - right) * (width < 690 ? 0.83 : 0.77);
       const y = top + (height - top - bottom) * 0.23;
-      const clueNumber = signal?.clueNumber ?? latestClue;
+      const stage = clamp(signal?.presentationStage ?? signal?.clueNumber ?? presentationStage, 0, MAX_PRESENTATION_STAGE);
       const clock = signal?.elapsed ?? time;
-      const phase = signal ? Math.min(1, clock / PULSE_LEAD) : 1;
+      const lead = signal ? (signal.radioAt ?? PULSE_LEAD) : 0;
+      const phase = lead > 0 ? clamp(clock / lead, 0, 1) : 1;
       const wave = this.reduceMotion ? 0.65 : 0.5 + 0.5 * Math.sin(clock * 1.3);
-      const pulse = clueNumber * (0.78 + 0.22 * wave) * (this.reduceMotion ? 1 : phase * phase * (3 - 2 * phase));
+      const pulse = stage * (0.78 + 0.22 * wave) * (this.reduceMotion ? 1 : phase * phase * (3 - 2 * phase));
       const radius = 11 + 7 * pulse;
       const glow = ctx.createRadialGradient(x, y, 0, x, y, radius);
       glow.addColorStop(0, `rgba(215, 235, 255, ${0.59 + 0.085 * pulse})`);
@@ -509,6 +532,10 @@
       const length = farEnd - nearStart;
       const stride = TILE * levelOfDetail(length, TILE, FAR_TILES);
       const runwayGaps = run.obstacles.filter(({ type, z, end }) => type === 'gap' && z < runwayEnd && end > nearStart);
+      for (const hazard of run.forecastObstacles ?? []) {
+        if (hazard.z >= runwayEnd) break;
+        if (hazard.type === 'gap' && hazard.end > nearStart) runwayGaps.push(hazard);
+      }
       const gaps = runwayGaps.filter(({ z }) => z < farEnd);
       const selected = ready ? -1 : run.lane;
       const last = Math.ceil(farEnd / stride) - 1;
@@ -769,36 +796,39 @@
       }
     }
 
-    hurdle(x, z) {
+    hurdle(x, z, detail = 1) {
       const { height, halfWidth, halfDepth } = obstacles.hurdle;
       this.box(x, 0, z, halfWidth * 2, 0.17, 0.47, ['#7b5271', '#44314d', '#987182']);
       this.box(x, 0.17, z, halfWidth * 2, height - 0.17, halfDepth * 2, amber);
+      if (!detail) return;
       const front = z - halfDepth - 0.002;
       const dashes = [-0.61, -0.13, 0.35];
       for (const dash of dashes) {
         this.face([[x + dash, .25, front], [x + dash + .19, .25, front],
-          [x + dash + .42, .61, front], [x + dash + .23, .61, front]], '#592f3d');
+          [x + dash + .42, .61, front], [x + dash + .23, .61, front]], mixPaint(amber[1], '#592f3d', detail));
       }
-      this.line([[x - 0.94, .67, front], [x + 0.94, .67, front]], '#ffe3ac', 1.6);
+      this.line([[x - 0.94, .67, front], [x + 0.94, .67, front]], '#ffe3ac', 1.6 * detail);
     }
 
-    barrier(x, z) {
+    barrier(x, z, detail = 1) {
       const { height, halfWidth, halfDepth } = obstacles.barrier;
       const front = z - halfDepth - 0.003;
       const point = (dx, fraction) => [x + dx, height * fraction, front];
       this.box(x, 0, z, halfWidth * 2, height, halfDepth * 2, pink);
+      if (!detail) return;
+      const panel = mixPaint(pink[1], '#532766', detail);
       this.face([point(-.82, .07), point(.81, .07), point(.81, .93),
-        point(-.54, .93), point(-.82, .82)], '#532766');
+        point(-.54, .93), point(-.82, .82)], panel);
       this.line([point(-.86, .065), point(-.86, .82), point(-.54, .945),
-        point(.83, .945), point(.83, .06), point(-.86, .06)], '#e4a8f8', 1.3);
+        point(.83, .945), point(.83, .06), point(-.86, .06)], '#e4a8f8', 1.3 * detail);
       const crack = [point(.35, .93), point(-.08, .71), point(.17, .585),
         point(-.29, .44), point(-.07, .35), point(-.44, .065)];
-      this.line(crack, '#be5ede', 5.4);
-      this.line(crack, '#f7c1ff', 2);
-      this.line([point(.70, .295), point(.42, .41), crack[3], point(-.55, .58)], '#ec9df8', 1.1);
+      this.line(crack, '#be5ede', 5.4 * detail);
+      this.line(crack, '#f7c1ff', 2 * detail);
+      this.line([point(.70, .295), point(.42, .41), crack[3], point(-.55, .58)], '#ec9df8', 1.1 * detail);
     }
 
-    platform(platform, distance, near, far) {
+    platform(platform, distance, near, far, detail = 1) {
       const { lane, height = PLATFORM_HEIGHT, z, end } = platform;
       const x = laneX(lane);
       const start = z - distance;
@@ -807,9 +837,11 @@
       const right = x + PLATFORM_HALF_WIDTH;
       const [top, , , edge] = platformPalette;
       this.structure(left, right, 0, height, near, far, near === start, platformPalette);
-      this.flat(left + 0.14, right - 0.14, near, far, '#3b506b', height + 0.012);
+      if (!detail) return;
+      const rim = mixPaint(top, edge, detail);
+      this.flat(left + 0.14, right - 0.14, near, far, mixPaint(top, '#3b506b', detail), height + 0.012);
       for (const rail of [left, right - 0.075]) {
-        this.flat(rail, rail + 0.075, near, far, edge, height + 0.018);
+        this.flat(rail, rail + 0.075, near, far, rim, height + 0.018);
       }
       const stride = TILE * levelOfDetail(this.viewDistance, TILE, 16);
       const stripe = Math.min(stride * 0.15, 0.32 / this.longitudinalScale);
@@ -820,16 +852,17 @@
       for (const lip of [start, finish - stripe]) {
         const edgeNear = Math.max(near, lip);
         const edgeFar = Math.min(far, lip + stripe);
-        if (edgeNear < edgeFar) this.flat(left, right, edgeNear, edgeFar, edge, height + 0.024);
+        if (edgeNear < edgeFar) this.flat(left, right, edgeNear, edgeFar, rim, height + 0.024);
       }
       if (near !== start) return;
+      const front = platformPalette[1];
       this.face([[left, height - 0.13, near], [right, height - 0.13, near],
-        [right, height, near], [left, height, near]], edge);
+        [right, height, near], [left, height, near]], mixPaint(front, edge, detail));
       this.face([[left + 0.16, 0.15, near], [right - 0.16, 0.15, near],
-        [right - 0.32, height - 0.26, near], [left + 0.32, height - 0.26, near]], '#152635');
+        [right - 0.32, height - 0.26, near], [left + 0.32, height - 0.26, near]], mixPaint(front, '#152635', detail));
     }
 
-    slideGate(gate, distance, near, far) {
+    slideGate(gate, distance, near, far, detail = 1) {
       const x = laneX(gate.lane);
       const start = gate.z - distance;
       const finish = gate.end - distance;
@@ -837,7 +870,7 @@
       const right = x + SLIDE_GATE_HALF_WIDTH;
       const bottom = SLIDE_GATE_CLEARANCE;
       const top = SLIDE_GATE_HEIGHT;
-      const rim = '#ffa48e';
+      const rim = mixPaint(gatePalette[1], '#ffa48e', detail);
       const foot = Math.min(0.44 / this.longitudinalScale, (finish - start) / 2);
       for (const position of [start, finish - foot]) {
         const postNear = Math.max(near, position);
@@ -848,12 +881,14 @@
         }
       }
       this.structure(left, right, bottom, top, near, far, near === start, gatePalette);
-      for (const rail of [left, right - 0.10]) this.flat(rail, rail + 0.10, near, far, '#ac6779', top + 0.016);
+      if (!detail) return;
+      const railPaint = mixPaint(gatePalette[0], '#ac6779', detail);
+      for (const rail of [left, right - 0.10]) this.flat(rail, rail + 0.10, near, far, railPaint, top + 0.016);
       if (near !== start) return;
       this.face([[left, bottom, near], [right, bottom, near],
         [right, bottom + 0.19, near], [left, bottom + 0.19, near]], rim);
       this.face([[left + 0.14, bottom + 0.32, near], [right - 0.14, bottom + 0.32, near],
-        [right - 0.14, top - 0.22, near], [left + 0.14, top - 0.22, near]], '#291925');
+        [right - 0.14, top - 0.22, near], [left + 0.14, top - 0.22, near]], mixPaint(gatePalette[1], '#291925', detail));
       for (const inset of [0.32, 0.76]) {
         const y = bottom + inset;
         this.face([[x - 0.60, y + 0.36, near], [x, y, near], [x + 0.60, y + 0.36, near],
@@ -872,17 +907,19 @@
       }
     }
 
-    movingBarrier(obstacle, z, time) {
+    movingBarrier(obstacle, z, time, detail = 1) {
       const x = movingBarrierX(obstacle, time);
+      this.barrier(x, z, detail);
+      if (!detail) return;
       const left = Math.min(laneX(obstacle.lane), laneX(obstacle.toLane));
       const right = Math.max(laneX(obstacle.lane), laneX(obstacle.toLane));
       const trackZ = z - 0.82 / this.longitudinalScale;
       const depth = 0.22 / this.longitudinalScale;
+      this.ctx.globalAlpha = detail;
       this.flat(left - 0.39, right + 0.39, trackZ - depth, trackZ + depth, '#6671a6', 0.036);
       for (const end of [left, right]) {
         this.flat(end - 0.20, end + 0.20, trackZ - 2 * depth, trackZ + 2 * depth, '#adcdf6', 0.040);
       }
-      this.barrier(x, z);
       const direction = Math.sign(movingBarrierX(obstacle, time + 0.10) -
         movingBarrierX(obstacle, Math.max(0, time - 0.10)));
       if (direction) {
@@ -892,6 +929,7 @@
         this.face([[tip, 0.27, trackZ], [step, 0.53, trackZ], [step, 0.37, trackZ],
           [tail, 0.37, trackZ], [tail, 0.17, trackZ], [step, 0.17, trackZ], [step, 0.01, trackZ]], '#b3ebff');
       }
+      this.ctx.globalAlpha = 1;
     }
 
     blackHole(obstacle, z, time) {
@@ -939,8 +977,10 @@
       ctx.restore();
     }
 
-    bolt(bolt, z) {
-      const point = this.viewPoint([laneX(bolt.lane), bolt.height, z]);
+    bolt(bolt, z, time = 0, reducedMotion = false) {
+      const { x: worldX, y: worldY } = boltPositionAt?.(bolt, time, reducedMotion) ??
+        { x: laneX(bolt.lane), y: bolt.height };
+      const point = this.viewPoint([worldX, worldY, z]);
       if (point[2] < NEAR) return;
       const [x, y] = this.screenPoint(point);
       const scale = Math.max(7.5, Math.min(60, this.focal / point[2] * 1.02));
@@ -966,36 +1006,55 @@
     spikes(patch, distance) {
       const left = laneX(patch.lane) - LANE_WIDTH / 2 + 0.1;
       const right = left + LANE_WIDTH * patch.lanes - 0.2;
-      const limit = this.viewDistance * OBSTACLE_VIEW_FRACTION;
       const front = patch.z - distance;
-      const first = Math.max(0, Math.ceil((-this.rearViewDistance - front) / patch.tileLength) - 1);
-      const last = Math.min(patch.tiles - 1, Math.floor((limit - front) / patch.tileLength));
-      for (let tile = last; tile >= first; tile--) {
-        const start = patch.z - distance + tile * patch.tileLength;
-        const end = start + patch.tileLength;
-        this.ctx.globalAlpha = Math.min(1, (195 - this.projectedDepth(start)) / 100);
-        const nearEdge = Math.max(start, -this.rearViewDistance);
-        const farEdge = Math.min(end, this.viewDistance);
-        this.flat(left, right, nearEdge, farEdge, '#6d223b', 0.027);
-        const plateStart = Math.max(start + 0.7, nearEdge);
-        const plateEnd = Math.min(end - 0.30, farEdge);
-        if (plateStart < plateEnd) this.flat(left + 0.08, right - 0.08, plateStart, plateEnd, '#3e142c', 0.03);
-        if (start >= -this.rearViewDistance) this.line([[left, 0.034, start], [right, 0.034, start]], '#ff7597', 1.6);
-        if (end <= this.viewDistance) this.flat(left, right, end - 0.22, end, '#b54260', 0.034);
-        for (let row = 5; row >= 0; row--) {
+      return (sliceNear, sliceFar, detail) => {
+        const first = Math.max(0, Math.floor((sliceNear - front) / patch.tileLength));
+        const last = Math.min(patch.tiles - 1, Math.ceil((sliceFar - front) / patch.tileLength) - 1);
+        for (let tile = last; tile >= first; tile--) {
+          const start = front + tile * patch.tileLength;
+          const end = start + patch.tileLength;
+          const nearEdge = Math.max(start, sliceNear);
+          const farEdge = Math.min(end, sliceFar);
+          const base = '#6d223b';
+          const plate = mixPaint(base, '#3e142c', detail);
+          this.flat(left, right, nearEdge, farEdge, base, 0.027);
+          if (detail) {
+            const plateStart = Math.max(start + 0.7, nearEdge);
+            const plateEnd = Math.min(end - 0.30, farEdge);
+            if (plateStart < plateEnd) this.flat(left + 0.08, right - 0.08, plateStart, plateEnd, plate, 0.03);
+            if (start >= sliceNear) this.line([[left, 0.034, start], [right, 0.034, start]], '#ff7597', 1.6 * detail);
+            if (end <= sliceFar) this.flat(left, right, Math.max(nearEdge, end - 0.22), end,
+              mixPaint(base, '#b54260', detail), 0.034);
+          }
           const depth = Math.min(3.5, patch.tileLength * 0.125);
-          const near = start + patch.tileLength * (0.07 + row * 0.15);
-          if (near + depth < -this.rearViewDistance || near + depth > this.viewDistance) continue;
-          for (let tooth = 0; tooth < patch.lanes * 2; tooth++) {
-            const x = left + (tooth + 0.5) * (right - left) / (patch.lanes * 2);
-            const point = [x, SPIKE_HEIGHT, near + depth * 0.55];
-            this.face([[x - 0.46, 0.04, near], [x + 0.46, 0.04, near], point], '#ef577f');
-            this.face([[x + 0.46, 0.04, near], [x + 0.37, 0.04, near + depth], point], '#9e3459');
-            this.face([[x - 0.46, 0.04, near], [x - 0.37, 0.04, near + depth], point], '#ff90a2');
+          for (let row = detail ? 5 : 0; row >= 0; row--) {
+            const near = start + patch.tileLength * (0.07 + row * 0.15);
+            if (near + depth <= nearEdge || near >= farEdge) continue;
+            const height = row ? 0.04 + (SPIKE_HEIGHT - 0.04) * detail : SPIKE_HEIGHT;
+            const paintTooth = (points, color) => {
+              if (near < nearEdge) points = clip(points, nearEdge, 2);
+              if (near + depth > farEdge) points = clip(points, farEdge, 2, -1);
+              this.face(points, row ? mixPaint(plate, color, detail) : color);
+            };
+            if (near >= this.viewDistance * SIMPLE_OBSTACLE_FRACTION) {
+              const front = [];
+              for (let tooth = 0; tooth < patch.lanes * 2; tooth++) {
+                const x = left + (tooth + 0.5) * (right - left) / (patch.lanes * 2);
+                front.push([x - 0.46, 0.04, near], [x, height, near + depth * 0.55], [x + 0.46, 0.04, near]);
+              }
+              paintTooth(front, '#ef577f');
+              continue;
+            }
+            for (let tooth = 0; tooth < patch.lanes * 2; tooth++) {
+              const x = left + (tooth + 0.5) * (right - left) / (patch.lanes * 2);
+              const point = [x, height, near + depth * 0.55];
+              paintTooth([[x + 0.46, 0.04, near], [x + 0.37, 0.04, near + depth], point], '#9e3459');
+              paintTooth([[x - 0.46, 0.04, near], [x - 0.37, 0.04, near + depth], point], '#ff90a2');
+              paintTooth([[x - 0.46, 0.04, near], [x + 0.46, 0.04, near], point], '#ef577f');
+            }
           }
         }
-      }
-      this.ctx.globalAlpha = 1;
+      };
     }
 
     player(run, time, ready, dashing, boosting) {
@@ -1565,90 +1624,172 @@
       this.horizon = this.centerY - this.focal * SIN / COS;
     }
 
+    distantObstacle(obstacle, distance, near, far, time, spikeSlice) {
+      const z = obstacle.z - distance;
+      const end = (obstacle.end ?? obstacle.z) - distance;
+      const { type } = obstacle;
+      const x = laneX(obstacle.lane);
+      const shape = obstacles[type === 'movingBarrier' ? 'barrier' : type];
+      const simple = near >= this.viewDistance * SIMPLE_OBSTACLE_FRACTION;
+      if (shape) {
+        const middle = type === 'movingBarrier' ? movingBarrierX(obstacle, time) : x;
+        if (!simple) {
+          this[type === 'hurdle' ? 'hurdle' : 'barrier'](middle, z, 0);
+          return;
+        }
+        const left = middle - shape.halfWidth;
+        const right = middle + shape.halfWidth;
+        const front = z - shape.halfDepth;
+        const tint = clamp((near / this.viewDistance - SIMPLE_OBSTACLE_FRACTION) / 0.5, 0, 1);
+        const color = type === 'hurdle' ? amber[1] :
+          type === 'movingBarrier' ? mixPaint(pink[1], '#577b94', tint) : pink[1];
+        this.face([[left, 0, front], [right, 0, front], [right, shape.height, front], [left, shape.height, front]], color);
+      } else if (type === 'spikes') {
+        spikeSlice(near, far, 0);
+      } else if (type === 'platform' || type === 'slideGate') {
+        if (!simple) this[type](obstacle, distance, near, far, 0);
+        else {
+          const gate = type === 'slideGate';
+          const half = gate ? SLIDE_GATE_HALF_WIDTH : PLATFORM_HALF_WIDTH;
+          const bottom = gate ? SLIDE_GATE_CLEARANCE : 0;
+          const top = gate ? SLIDE_GATE_HEIGHT : obstacle.height ?? PLATFORM_HEIGHT;
+          this.structure(x - half, x + half, bottom, top, near, far, z === near, gate ? gatePalette : platformPalette);
+        }
+      } else if (type === 'gap' || type === 'blackHole') {
+        // The cut edges and pull-field outline are lighting effects.
+        this.obstacleLight = 1;
+        this.ctx.globalAlpha = 0.55 / Math.sqrt((type === 'gap' ? Math.max(near, z) : z) / this.viewDistance);
+        if (type === 'gap') {
+          const left = x - LANE_WIDTH / 2;
+          const right = left + (obstacle.lanes ?? 1) * LANE_WIDTH;
+          if (z >= this.viewDistance && z < far) this.line([[left, 0, z], [right, 0, z]], '#71629a', 0.7);
+          if (end > this.viewDistance && end < far) this.line([[left, 0, end], [right, 0, end]], '#608690', 0.7);
+        } else {
+          const half = BLACK_HOLE_HALF_WIDTH;
+          const height = 0.5;
+          this.line([[x - half, height, z], [x, height, z - BLACK_HOLE_HALF_DEPTH], [x + half, height, z],
+            [x, height, z + BLACK_HOLE_HALF_DEPTH], [x - half, height, z]], '#a691e7', 0.8);
+        }
+        this.ctx.globalAlpha = 1;
+      }
+    }
+
     drawCourseObjects(run, time, ready, dashing, boosting, death = null) {
       const limit = this.viewDistance * OBSTACLE_VIEW_FRACTION;
+      const far = this.viewDistance * RUNWAY_RANGE_MULTIPLIER;
       const rear = -this.rearViewDistance;
+      const { distance } = run;
+      const lightAtSeam = clamp((185 - this.projectedDepth(limit)) / 112, 0.35, 0.56);
+      const lightAt = (z) => {
+        const range = Math.max(0, z) / limit;
+        return range > 1 ? lightAtSeam / Math.sqrt(range) : 1 - (1 - lightAtSeam) * range ** 3;
+      };
+      const detailAt = (z) => {
+        const blend = clamp((limit - z) / (this.viewDistance * 0.17), 0, 1);
+        return blend * blend * (3 - 2 * blend);
+      };
+      const effectAlpha = (z) => clamp((185 - this.projectedDepth(z)) / 112, 0, 1);
+
+      const layers = new Map();
+      const layerAt = (z) => {
+        if (!layers.has(z)) layers.set(z, { points: [], enter: [], leave: [] });
+        return layers.get(z);
+      };
+      const addPoint = (z, item, start, end) => {
+        if (z >= start && z < end) layerAt(z).points.push(item);
+      };
+      const addSpan = (near, end, item) => {
+        if (near >= end) return;
+        layerAt(end).enter.push(item);
+        layerAt(near).leave.push(item);
+      };
+
       let playerDepth = 0;
       if (!run.airborne && run.height > 0 && (dashing || boosting)) {
         // Paint the supporting deck beneath the whole wake before drawing the runner.
         const wake = this.reduceMotion ? SHORT_WAKE : dashing ? DASH_WAKE : SLIDE_WAKE;
         playerDepth = -wake / this.longitudinalScale;
       }
-      const atDepth = new Map();
-      const spans = [];
-      const addPoint = (z, item) => {
-        if (z < rear || z >= limit) return;
-        if (!atDepth.has(z)) atDepth.set(z, []);
-        atDepth.get(z).push(item);
-      };
-      if (!run.crash && !death) addPoint(playerDepth, { type: 'player' });
+      if (!run.crash && !death) addPoint(playerDepth, { type: 'player' }, rear, limit);
       if (this.slideBurst) {
-        const z = this.slideBurst.z - run.distance;
+        const z = this.slideBurst.z - distance;
         const orderDepth = this.slideBurst.y > 0 ? Math.max(rear, z - 1.8 / this.longitudinalScale) : z;
-        if (z >= rear) addPoint(orderDepth, { type: 'slideBurst', z });
+        if (z >= rear) addPoint(orderDepth, { type: 'slideBurst', z }, rear, limit);
       }
-      for (const obstacle of run.obstacles) {
-        const z = obstacle.z - run.distance;
-        switch (obstacle.type) {
-          case 'gap':
-            break;
-          case 'spikes':
-            this.spikes(obstacle, run.distance);
-            break;
-          case 'platform':
-          case 'slideGate': {
-            const near = Math.max(rear, z);
-            const far = Math.min(limit, obstacle.end - run.distance);
-            if (near >= far) break;
-            spans.push({ obstacle, near, far });
-            if (!atDepth.has(near)) atDepth.set(near, []);
-            if (!atDepth.has(far)) atDepth.set(far, []);
-            break;
+
+      for (const [hazards, start] of [[run.obstacles, rear], [run.forecastObstacles ?? [], limit]]) {
+        for (const obstacle of hazards) {
+          const z = obstacle.z - distance;
+          if (z >= far) continue;
+          const { type } = obstacle;
+          if (type === 'gap') {
+            if (obstacle.end - distance > this.viewDistance) this.distantObstacle(obstacle, distance, limit, far, run.time);
+          } else if (type === 'spikes' || type === 'platform' || type === 'slideGate') {
+            const near = Math.max(start, z);
+            const end = Math.min(far, obstacle.end - distance);
+            if (near >= end) continue;
+            const span = { obstacle, spikeSlice: type === 'spikes' ? this.spikes(obstacle, distance) : null };
+            addSpan(near, Math.min(limit, end), span);
+            addSpan(Math.max(limit, near), end, span);
+          } else {
+            addPoint(z, obstacle, start, far);
           }
-          default:
-            addPoint(z, obstacle);
         }
       }
-      for (const bolt of run.bolts ?? []) addPoint(bolt.z - run.distance, { type: 'bolt', bolt });
+      for (const bolt of run.bolts ?? []) addPoint(bolt.z - distance, { type: 'bolt', bolt }, rear, limit);
 
-      const depths = [...atDepth.keys()].sort((a, b) => b - a);
-      const ambient = (z) => Math.min(1, (185 - this.projectedDepth(z)) / 112);
+      const depths = [...layers.keys()].sort((a, b) => b - a);
+      const active = new Set();
       for (let index = 0; index < depths.length; index++) {
         const z = depths[index];
-        for (const item of atDepth.get(z)) {
-          this.ctx.globalAlpha = item.type === 'player' ? 1 : ambient(z);
-          if (item.type === 'player') {
+        const layer = layers.get(z);
+        const detail = detailAt(z);
+        for (const item of layer.points) {
+          const { type } = item;
+          this.obstacleLight = 1;
+          this.ctx.globalAlpha = 1;
+          if (z >= limit) {
+            this.obstacleLight = lightAt(z);
+            this.distantObstacle(item, distance, z, far, run.time);
+          } else if (type === 'player') {
             this.player(run, time, ready, dashing, boosting);
-          } else if (item.type === 'slideBurst') {
-            this.drawSlideBurst(item.z, run.time);
-          } else if (item.type === 'bolt') {
-            this.bolt(item.bolt, z);
-          } else if (item.type === 'movingBarrier') {
+          } else if (type === 'slideBurst' || type === 'bolt' || type === 'blackHole') {
+            this.ctx.globalAlpha = effectAlpha(z);
+            if (type === 'slideBurst') this.drawSlideBurst(item.z, run.time);
+            else if (type === 'bolt') this.bolt(item.bolt, z, run.boltTime, run.reducedMotion);
+            else this.blackHole(item, z, this.reduceMotion ? 0 : time);
+          } else if (type === 'movingBarrier') {
             const impactTime = death && item.id === death.impact.id ? death.impact.impactTime : undefined;
-            this.movingBarrier(item, z, impactTime ?? run.time);
-          } else if (item.type === 'blackHole') {
-            this.blackHole(item, z, this.reduceMotion ? 0 : time);
-          } else if (Object.hasOwn(obstacles, item.type)) {
+            this.obstacleLight = lightAt(z);
+            this.movingBarrier(item, z, impactTime ?? run.time, detail);
+          } else if (Object.hasOwn(obstacles, type)) {
             const x = laneX(item.lane);
-            const halfWidth = obstacles[item.type].halfWidth;
-            if (halfWidth) this.flat(x - halfWidth - 0.11, x + halfWidth + 0.11, z - 0.63, z + 0.54, '#130b20b5', .028);
-            this[item.type](x, z);
+            const halfWidth = obstacles[type].halfWidth;
+            this.ctx.globalAlpha = detail * effectAlpha(z);
+            if (detail) this.flat(x - halfWidth - 0.11, x + halfWidth + 0.11, z - 0.63, z + 0.54, '#130b20b5', .028);
+            this.ctx.globalAlpha = 1;
+            this.obstacleLight = lightAt(z);
+            this[type](x, z, detail);
           }
         }
-        // Each span draws the part behind this depth before painting the part in front of it.
+        // Paint each slice behind the next point or cap before advancing toward the camera.
+        for (const obstacle of layer.leave) active.delete(obstacle);
+        for (const obstacle of layer.enter) active.add(obstacle);
         const near = depths[index + 1];
-        if (near === undefined) break;
-        for (const span of spans) {
-          if (near < span.near || z > span.far) continue;
-          this.ctx.globalAlpha = ambient(span.near);
-          this[span.obstacle.type](span.obstacle, run.distance, near, z);
+        if (near === undefined || !active.size) continue;
+        this.ctx.globalAlpha = 1;
+        this.obstacleLight = lightAt(near);
+        for (const { obstacle, spikeSlice } of active) {
+          if (near >= limit) this.distantObstacle(obstacle, distance, near, z, run.time, spikeSlice);
+          else if (spikeSlice) spikeSlice(near, z, detailAt(near));
+          else this[obstacle.type](obstacle, distance, near, z, detailAt(near));
         }
       }
+      this.obstacleLight = 1;
       this.ctx.globalAlpha = 1;
       if (death) this.deathPlayer(run, death);
     }
-
-    draw(run, time, dt, mode, latestClue = 0, signal = null, death = null) {
+    draw(run, time, dt, mode, presentationStage = 0, signal = null, death = null) {
       const ready = mode === 'ready';
       const dashing = mode === 'running' && run.dashing;
       const boosting = mode === 'running' && run.boosting;
@@ -1660,7 +1801,7 @@
       else this.openingBlend *= Math.exp(-dt * 8);
       this.frameCamera(run);
 
-      this.sky(this.reduceMotion ? 0 : time, latestClue, signal);
+      this.sky(this.reduceMotion ? 0 : time, presentationStage, signal);
       this.deepVoid(run.distance);
       this.track(run, ready);
       this.drawCourseObjects(run, time, ready, dashing, boosting, mode === 'dying' ? death : null);

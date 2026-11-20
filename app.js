@@ -2,9 +2,12 @@
   'use strict';
 
   const { Run, STEP, LANE_COUNT, SPIKE_HEIGHT, slideGateBounds } = globalThis.VoidRunner;
-  const { EpisodeProgress, SAVE_KEY, CLUES, PULSE_LEAD } = globalThis.VoidEpisode;
+  const { EpisodeProgress, SAVE_KEY, CLUES } = globalThis.VoidEpisode;
   const query = new URLSearchParams(location.search);
-  const preview = CLUES.findIndex((_, index) => query.get('preview') === `clue${index + 1}`) + 1;
+  const previewQuery = query.get('preview');
+  // The original clue4 preview link is a permalink for the beacon recording.
+  const preview = CLUES.findIndex(({ id }, index) => previewQuery === id || previewQuery === String(index + 1) ||
+    (previewQuery === 'clue4' ? id === 'beacon' : previewQuery === `clue${index + 1}`)) + 1;
   const scenario = preview ? '' : query.get('scenario') || '';
   const pace = preview ? '' : query.get('pace') || '';
   const requestedSeed = Number(query.get('seed'));
@@ -60,14 +63,109 @@
   const DEATH_ECHO = 1.37;
   const DEATH_REVEAL = 1.55;
   const DEATH_END = 3.75;
-  const DEATH_THOUGHTS = [
-    ['One white dot.', 'I can still picture it.'],
-    ['A voice in all that hiss?', 'Almost made out a word.'],
-    ['Who was asking?', 'I had the same question.'],
-    ['They said “again.”', 'How many times have they seen it?'],
-    ['How far to the beacon?', 'Who did they mean by “we”?'],
-  ];
-  const deathVisits = DEATH_THOUGHTS.map(() => 0);
+  const DEATH_THOUGHTS = {
+    none: [
+      'One white dot.',
+      'I can still picture it.',
+      'Five lanes. One dot.',
+      'I could cover it with my thumb.',
+      'My eyes went there first.',
+      'I watched it instead of my feet.',
+      'Where does the track end?',
+      'Even when I blink.',
+    ],
+    hiss: [
+      'A voice in all that hiss?',
+      'Almost made out a word.',
+      'Was that a breath?',
+      'Static. Then something softer.',
+      'I leaned in to listen.',
+      'I almost said it back.',
+      'Where did the hiss end?',
+      'I caught the shape of a word.',
+    ],
+    question: [
+      'Who was asking?',
+      'I had the same question.',
+      'What did they mean by “that”?',
+      'Funny. I nearly answered.',
+      'They sounded as lost as me.',
+      'Did they see it too?',
+      'I could hear the question mark.',
+      'Who did they expect to answer?',
+    ],
+    sighting: [
+      'They said “again.”',
+      'How many times have they seen it?',
+      'Same light. A different run.',
+      'Which time did they mean?',
+      'I remember where I was looking.',
+      'Did it look familiar to them?',
+      'Maybe they looked away too.',
+      'I keep coming back to that word.',
+    ],
+    pattern: [
+      'I started counting the pauses.',
+      'Were they always that long?',
+      'What did I miss in the quiet?',
+      'I held my breath for the next.',
+      'How many pauses did I hear?',
+      'Was I hearing a pattern too?',
+      'Could I tap out those pauses?',
+      'I keep waiting for the next one.',
+    ],
+    beacon: [
+      'How far to the beacon?',
+      'Who did they mean by “we”?',
+      'They sounded so sure this time.',
+      'Could my thumb still hide it?',
+      'Did they have a way to get there?',
+      'A light to steer by. For whom?',
+      'I heard every word this time.',
+      'Would I stop if I reached it?',
+    ],
+    purpose: [
+      'Could it be meant to guide me?',
+      'Built by whom?',
+      'Where would I end up?',
+      'I never asked who built it.',
+      'What would I use it to find?',
+      'Was it even built to guide?',
+      'Could I follow it from here?',
+      'I wondered the same thing.',
+    ],
+    warning: [
+      'Could I leave it alone?',
+      'Who else needs to hear that?',
+      'Do I know who “the others” are?',
+      'Would I have said the same?',
+      'I keep hearing “leave it.”',
+      'Would I pass on those words?',
+      'I can still hear that voice.',
+      'What made them say that?',
+    ],
+    doubt: [
+      'What would I be warned about?',
+      'Would I know it was a warning?',
+      'What if they guessed right?',
+      'I heard them hesitate.',
+      'Would that make me turn back?',
+      'I can’t shake that question.',
+      'Could the warning be for me?',
+      'What would I do if it was?',
+    ],
+    reach: [
+      'Could I find who sent it?',
+      'I heard the weight on “must.”',
+      'What would I ask the sender?',
+      'Would they let me come along?',
+      'How would I know I was there?',
+      'Could I get there first?',
+      'I wanted to hear one more word.',
+      'Would the sender answer me?',
+    ],
+  };
+  const deathVisits = new Map();
   const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
   const INSTALLED_KEY = 'void-runner-installed';
   const appDisplayMode = matchMedia('(display-mode: standalone), (display-mode: fullscreen)');
@@ -120,7 +218,11 @@
   }
 
   function createRun() {
-    return new Run({ seed, scenario, pace, discoveredClues: episode?.discoveredClues ?? 0, onEvent });
+    const fresh = new Run({
+      seed, scenario, pace, launchLevel: episode?.launchLevel ?? 0, transmissionCount: CLUES.length, onEvent,
+    });
+    fresh.reducedMotion = reducedMotion.matches;
+    return fresh;
   }
 
   function createSoundtrack() {
@@ -151,30 +253,36 @@
   function updatePresentation() {
     const transmission = run.transmission;
     const live = mode === 'running' && liveClue !== null && transmission?.phase === 'playing';
-    signal = live ? { clueNumber: liveClue, elapsed: transmission.elapsed } : replay;
-    const transmissionClue = signal?.clueNumber ?? null;
-    const transmissionTime = signal?.elapsed ?? null;
-    const clue = signal && CLUES[signal.clueNumber - 1];
-    const afterPulse = signal !== null && transmissionTime >= PULSE_LEAD;
-    const line = afterPulse ? clue.line : '';
+    const cue = live ? { clueNumber: liveClue, elapsed: transmission.elapsed } : replay;
+    const clue = cue ? CLUES[cue.clueNumber - 1] : null;
+    signal = cue ? { ...cue, presentationStage: clue.presentationStage, radioAt: clue.radioAt } : null;
+    const transmissionTime = cue?.elapsed ?? null;
+    const afterLead = cue !== null && transmissionTime >= clue.radioAt;
+    const line = afterLead ? (clue.followUp ? `${clue.line}\n${clue.followUp}` : clue.line) : '';
     const { dataset } = document.body;
-    const strength = String(transmissionClue ?? 0);
+    const strength = String(clue?.presentationStage ?? 0);
     if (dataset.signal !== strength) dataset.signal = strength;
-    const noise = String(transmissionClue === 1 || afterPulse);
+    const noise = String(afterLead);
     if (dataset.signalNoise !== noise) dataset.signalNoise = noise;
-    const inverted = String(transmissionClue === 4 && afterPulse);
+    const inverted = String(afterLead && clue.invert && !reducedMotion.matches);
     if (dataset.signalInvert !== inverted) dataset.signalInvert = inverted;
     write(signalStatus, live ? 'Receiving a signal' : replay ? 'Playing transmission' : '');
     write(skySignal, line);
     updateDeathPresentation();
-    const replayGroupHidden = mode !== 'ended' || latestClue() === 0;
+    const replayGroupHidden = mode !== 'ended' || !(previewCaptured || episode?.discoveredClues);
     if (replayGroup.hidden !== replayGroupHidden) replayGroup.hidden = replayGroupHidden;
     if (!replayGroupHidden) {
       for (const [index, button] of replayButtons.entries()) {
         const ordinal = index + 1;
         const hidden = !canReplay(ordinal);
         if (button.hidden !== hidden) button.hidden = hidden;
-        write(button, replay?.clueNumber === ordinal ? `Stop clue ${ordinal}` : `Replay clue ${ordinal}`);
+        const active = replay?.clueNumber === ordinal;
+        const pressed = String(active);
+        if (button.dataset.active !== pressed) {
+          button.dataset.active = pressed;
+          button.setAttribute('aria-pressed', pressed);
+          write(button, active ? `Stop ${ordinal}` : `Clue ${ordinal}`);
+        }
       }
     }
     audio('update', {
@@ -183,7 +291,8 @@
       musicTierFloor: run.musicTierFloor,
       transmissionTime,
       transmissionDuration: clue?.duration ?? CLUES[0].duration,
-      transmissionClue,
+      transmissionClue: clue?.audioKey ?? null,
+      transmissionRadioAt: clue?.radioAt ?? null,
     });
   }
 
@@ -510,12 +619,12 @@
     if (!run.crash) queueTransmission();
   }
 
-  function latestClue() {
-    return previewCaptured ? preview : episode?.discoveredClues ?? 0;
+  function latestPresentationStage() {
+    return previewCaptured ? CLUES[preview - 1].presentationStage : episode?.presentationStage ?? 0;
   }
 
   function canReplay(clueNumber) {
-    return preview ? previewCaptured && clueNumber === preview : clueNumber <= latestClue();
+    return preview ? previewCaptured && clueNumber === preview : episode?.hasHeard(CLUES[clueNumber - 1].id);
   }
 
   function toggleReplay(event, clueNumber) {
@@ -561,11 +670,12 @@
   }
 
   function beginDeath(impact) {
-    const stage = episode?.discoveredClues ?? 0;
-    const thoughts = DEATH_THOUGHTS[stage];
-    const line = thoughts?.[deathVisits[stage]] ?? DEATH_THOUGHTS[0][0];
-    if (thoughts) deathVisits[stage] = (deathVisits[stage] + 1) % thoughts.length;
-    death = { impact, elapsed: 0, line, sceneClue: latestClue(), revealed: false, steady: false };
+    const knowledge = episode?.latestHeardId ?? 'none';
+    const thoughts = DEATH_THOUGHTS[knowledge];
+    const visit = deathVisits.get(knowledge) ?? 0;
+    const line = thoughts[visit];
+    deathVisits.set(knowledge, (visit + 1) % thoughts.length);
+    death = { impact, elapsed: 0, line, presentationStage: latestPresentationStage(), revealed: false, steady: false };
     mode = 'dying';
     document.body.dataset.mode = mode;
     lag = 0;
@@ -808,6 +918,7 @@
     }
     const elapsed = previousFrame === null ? 0 : (now - previousFrame) / 1000;
     previousFrame = now;
+    run.reducedMotion = reducedMotion.matches;
     if (mode === 'running') {
       lag += elapsed;
       // Preserve elapsed play time while limiting how much a delayed frame can process at once.
@@ -833,7 +944,7 @@
     const frozen = death || (mode === 'ended' && !replay);
     const visualDelta = frozen ? 0 : Math.min(elapsed, 0.1);
     sceneTime += visualDelta;
-    scene.draw(run, sceneTime, visualDelta, mode, death?.sceneClue ?? latestClue(), signal, death);
+    scene.draw(run, sceneTime, visualDelta, mode, death?.presentationStage ?? latestPresentationStage(), signal, death);
     if (death?.revealed && Number.isFinite(scene.horizon)) {
       const bottom = `calc(100% - ${Math.floor(scene.horizon) - 8}px)`;
       if (deathThought.style.bottom !== bottom) deathThought.style.bottom = bottom;

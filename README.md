@@ -31,29 +31,34 @@ When the browser offers a native install prompt, **Install** opens it directly. 
 
 The violet reflectors along the deck edges show forward motion from the start. Their trails grow as you gain speed and shorten when you slide. The darker sky drifts behind Relay Nine. System reduced motion keeps the sky steady.
 
-Before completing Clue 1, the center hurdle arrives about 1.6 seconds into an endless run. Jump or move aside, then watch for the cracked barrier and the side-lane obstacles that follow. Mixed sections soon ask you to jump, change lanes, and slide in quick succession. Each discovery raises the next run’s starting tier, with harder openings and more demanding combinations available early.
+Before completing Clue 1, the center hurdle arrives about 1.6 seconds into an endless run. Jump or move aside, then watch for the cracked barrier and the side-lane obstacles that follow. Mixed sections soon ask you to jump, change lanes, and slide in quick succession. Higher earned tiers bring harder openings and more demanding combinations earlier in the next run.
 
-Longer runs reach higher tiers between clue discoveries. Read the next entrance as you leave each section. A wall can leave just one route, and the lane for the next action can shift. Later combinations add raised platforms, moving barriers, black-hole pulls, single-lane funnels, and sideways jumps between solid lanes. [See the tier progression and controls](docs/gameplay.md#later-obstacle-tiers).
+Longer runs reach higher tiers between clue discoveries. Silhouettes on the distant runway show upcoming obstacles. Read the next entrance as you leave each section. A wall can leave just one route, and the lane for the next action can shift. Later combinations add raised platforms, moving barriers, black-hole pulls, single-lane funnels, and sideways jumps between solid lanes. [See the tier progression and controls](docs/gameplay.md#later-obstacle-tiers).
 
-Bolts are spaced out in ordinary play, with some beside hazards in later tiers. Follow the longer bolt trails on clear track during live clue transmissions. Each pickup restores up to a quarter of your dash charge. Results show the bolts collected that run and the total banked for future unlocks.
+Bolts bob and sway within their lanes. Run through low bolts, or jump over a hurdle or onto a platform to reach some higher ones in later tiers. System reduced motion holds them steady. Follow the longer bolt trails on clear track during live clue transmissions. Each pickup removes up to one second of dash recharge. Results show the bolts collected that run and the total banked for future unlocks.
 
 ## Local clue playtest
 
 Run `python -m http.server 8000` from this folder and open the [ordinary local game](http://127.0.0.1:8000/). Choose **Start run** or press **Enter**. Audio waits for a player gesture, such as starting a run or pressing **Mute**. Use **Mute** to toggle sound.
 
-Relay Nine is visible from the start. Cumulative meters across ordinary runs make clues eligible in order. Each live transmission waits for the last hazards to clear. If several clues are ready, ordinary play resumes between transmissions. The current track slows and softens, and all movement controls stay active. A crash or reload before completion leaves the clue pending. After discovery, the star keeps its new pulse across runs and reloads, and results let you select a recording to replay.
+Relay Nine is visible from the start. Cumulative meters across ordinary runs make nine recordings eligible. The next eligible unheard recording queues in clue order and waits for the last hazards to clear. If several clues are ready, ordinary play resumes between transmissions. The current track slows and softens, and all movement controls stay active. A crash or reload before completion leaves the clue pending. The star keeps the strongest pulse you’ve earned across runs and reloads. Results let you replay any recording you’ve heard.
 
-Your latest completed live transmission sets the launch speed, opening difficulty, and music tier for the **next** ordinary endless run. Each run starts at 0 m and credits the distance you cover. Replay earns zero meters.
+Your highest earned tier sets the launch speed, opening difficulty, and minimum music tier for the **next** ordinary endless run. Each run starts at 0 m and credits the distance you cover. Replay earns zero meters. Existing saves keep their completed recordings, earned eligibility, and bolt bank. The original Beacon recording now appears as Clue 5 and can already be available on a migrated save.
 
 - **Before any discovery** · 48 m/s and Tier 1.
-- **Clue 1, eligible at 5,000 m** · 80 m/s and Tier 2 after discovery.
-- **Clue 2, eligible at 20,000 m** · 112 m/s and Tier 3 after discovery.
-- **Clue 3, eligible at 50,000 m** · 144 m/s and Tier 4 after discovery.
-- **Clue 4, eligible at 90,000 m** · 176 m/s and Tier 5 after discovery.
+- **Clue 1, eligible at 15,000 m** · Tier 2 at 80 m/s.
+- **Clue 2, eligible at 35,000 m** · Tier 3 at 112 m/s.
+- **Clue 3, eligible at 65,000 m** · Tier 4 at 144 m/s.
+- **Clue 4, eligible at 95,000 m** · Tier 4.
+- **Clue 5, eligible at 125,000 m** · Tier 5 at 176 m/s.
+- **Clue 6, eligible at 160,000 m** · Tier 5.
+- **Clue 7, eligible at 195,000 m** · Tier 5.
+- **Clue 8, eligible at 230,000 m** · Tier 5.
+- **Clue 9, eligible at 270,000 m** · Tier 5.
 
 Clue progress is saved per browser origin. In the ordinary game over HTTP or HTTPS at `localhost`, `127.0.0.1`, or `[::1]`, select **Reset clue progress** on the start or results screen. This resets cumulative distance to 0 m, clears pending and discovered clues and their recordings, and restores the 48 m/s start with Tier 1 music. You keep your banked bolts and settings. If the browser blocks the save, the reset applies only to the current tab.
 
-Open the [Clue 1 preview](http://127.0.0.1:8000/?preview=clue1), or use `?preview=clue2` through `?preview=clue4`. Choose **Start run** to queue that transmission on clear track. Preview and scripted practice leave your personal progress and bolt bank untouched. Reload a preview to repeat it.
+Use `?preview=1` through `?preview=9` or a recording’s stable ID, such as `?preview=pattern`. Choose **Start run** to play the selected transmission on clear track. [Clue 4’s numeric preview](http://127.0.0.1:8000/?preview=4) opens Pattern. The [original Clue 4 preview link](http://127.0.0.1:8000/?preview=clue4) still opens Beacon, now Clue 5. Preview and scripted practice are separate from personal progress and the bolt bank. Reload a preview to repeat it.
 
 ## Acceptance scenarios
 
@@ -80,7 +85,7 @@ Open the game in your browser and append `?scenario=landing` to its address. Rep
 - [`challenge`](http://127.0.0.1:8000/?scenario=challenge) starts at 144 m/s, or 176 m/s with `&pace=fast`. Start one lane left of center and jump the hurdle around 252 m (308 m at fast pace). Move to center and slide past the sweep, then move one lane right for the next two gates. On the gap cue, jump and move left twice in the air. Slide through the full-width gate on the far side. Jump the last hurdle around 1,701 m (1,994 m at fast pace), then steer back left after the pull and slide through the final gate of the authored opening.
 
   After the three opening sections, the endless course generator adds obstacles at your current speed with the usual warning distance. The generated course begins at Tier 4, or Tier 5 at fast pace. The entire route runs in practice mode, separate from saved clue progress and the bolt bank.
-- `?seed=187` gives a repeatable endless opening for the same number of discovered clues. With all four discovered, the 176 m/s opening has a two-lane, two-tile spike patch in its first row at **287 m**. Use the practice scenarios above to rehearse the moves needed in the later sections.
+- `?seed=187` gives a repeatable endless opening at the same earned launch level. Once you’ve heard Beacon, the 176 m/s opening has a two-lane, two-tile spike patch in its first row at **287 m**. Use the practice scenarios above to rehearse the moves needed in the later sections.
 - `lanes` puts a blocker in the starting lane. Hold an arrow to confirm you move just one lane. Release and press again to move another lane.
 
 On touch, try `lanes` for one move per swipe. Use `landing` to try a ground slide, a jump into a power slide, and Dash charge. Use `spike-long` to try a jump followed by a second-finger Dash. Rotate during an unfinished swipe in `landing` and confirm that lifting the old touch does nothing. Try a fresh swipe in the new orientation, then check **Run again** after a collision in `hurdle`.

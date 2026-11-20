@@ -3,7 +3,10 @@
 
   const SAMPLE_RATE = 24000;
   const RADIO_LENGTH = 8;
-  const TRANSMISSION_LENGTHS = [RADIO_LENGTH, 8, 10, 12];
+  // Defaults are keyed by clue ID. The pattern (5) plays before the beacon (4).
+  const TRANSMISSION_LENGTHS = { 1: RADIO_LENGTH, 2: 8, 3: 10, 4: 12, 5: 9, 6: 9, 7: 10, 8: 9, 9: 11 };
+  const FIRST_NEW_RECORDING = 5;
+  const STATIC_LENGTH = 0.48;
   const PULSE_LEAD = root.VoidEpisode?.PULSE_LEAD ?? 1.2;
   const assetPath = 'audio/relay-nine.js';
   const scriptUrl = root.document?.currentScript?.src;
@@ -105,13 +108,13 @@
   }
 
   function loadRecordings() {
-    if (!root.document) return Promise.resolve([]);
+    if (!root.document) return Promise.resolve({});
     // A classic script can carry pre-encoded audio even on file: pages, where fetch is blocked.
     recordings ||= new Promise(resolve => {
       const script = root.document.createElement('script');
       const finish = () => {
         script.remove();
-        resolve(script.recordings ?? []);
+        resolve(script.recordings ?? {});
       };
       script.onload = script.onerror = finish;
       script.src = scriptUrl ? new URL(assetPath, scriptUrl).href : assetPath;
@@ -196,6 +199,23 @@
       const envelope = Math.min(1, t / 0.055, (RADIO_LENGTH - t) / 0.16);
       data[i] = Math.tanh(data[i] * 1.75) * 0.52 * envelope;
       if (i % block === block - 1) yield;
+    }
+    return buffer;
+  }
+
+  function renderStatic(context) {
+    const buffer = context.createBuffer(1, Math.round(STATIC_LENGTH * SAMPLE_RATE), SAMPLE_RATE);
+    const data = buffer.getChannelData(0);
+    const random = randomFor(0x37e21);
+    let low = 0;
+    let high = 0;
+    for (let i = 0; i < data.length; i++) {
+      const t = i / SAMPLE_RATE;
+      const noise = random();
+      low += (noise - low) * 0.087;
+      high += (noise - high) * 0.63;
+      const envelope = Math.min(1, t / 0.018, (STATIC_LENGTH - t) / 0.12);
+      data[i] = (high - low) * envelope * (0.055 + 0.21 * decay(Math.abs(t - 0.065), 0.075));
     }
     return buffer;
   }
@@ -345,7 +365,7 @@
 
     update({
       mode = this.mode, speed = this.speed, musicTierFloor = this.musicTierFloor,
-      transmissionClue = 1, transmissionTime = null, transmissionDuration,
+      transmissionClue = 1, transmissionTime = null, transmissionDuration, transmissionRadioAt,
     } = {}) {
       if (this.disposed) return;
       const previousMode = this.mode;
@@ -366,20 +386,26 @@
         }
       }
       const clue = transmissionClue;
-      const knownClue = Number.isInteger(clue) && clue >= 1 && clue <= TRANSMISSION_LENGTHS.length;
+      const knownClue = Number.isInteger(clue) && Object.hasOwn(TRANSMISSION_LENGTHS, clue);
       const duration = Number.isFinite(transmissionDuration) && transmissionDuration > 0 ?
-        transmissionDuration : knownClue ? TRANSMISSION_LENGTHS[clue - 1] : 0;
+        transmissionDuration : knownClue ? TRANSMISSION_LENGTHS[clue] : 0;
+      const radioAt = Number.isFinite(transmissionRadioAt) && transmissionRadioAt >= 0 ?
+        transmissionRadioAt : clue === 1 ? 0 : PULSE_LEAD;
       const elapsed = Number.isFinite(transmissionTime) ? Math.max(0, transmissionTime) : null;
       const previous = this.transmission;
       if (!knownClue || elapsed === null || elapsed >= duration) {
         this.transmission = null;
         this.clearRadio();
       } else if (this.mode !== previousMode || previous?.clue !== clue ||
-        previous.duration !== duration || elapsed < previous.elapsed - 0.05) {
-        this.transmission = { clue, elapsed, duration, radioAt: clue === 1 ? 0 : PULSE_LEAD, missed: false };
+        previous.duration !== duration || previous.radioAt !== radioAt || elapsed < previous.elapsed - 0.05) {
+        this.transmission = { clue, elapsed, duration, radioAt, missed: false };
         this.clearRadio();
       } else {
         previous.elapsed = elapsed;
+      }
+      // Remember a missed entry even while the audio context is locked or hidden.
+      if (this.transmission && clue >= FIRST_NEW_RECORDING && elapsed >= radioAt && !this.spokenRadio.has(clue)) {
+        this.transmission.missed = true;
       }
       this.play();
     }
@@ -640,26 +666,26 @@
 
     syncRadio(now) {
       const cue = this.transmission;
-      if (!cue || cue.missed || cue.elapsed < cue.radioAt) return;
+      if (!cue || cue.elapsed < cue.radioAt) return;
       const { clue, elapsed, duration, radioAt } = cue;
       const spoken = clue !== 1;
       const recording = this.spokenRadio.get(clue);
-      if (spoken && !recording) {
-        // Missing or late assets must not interrupt the cue clock or join the line midway.
-        cue.missed = true;
-        return;
-      }
+      // Keep the same asset decision for this playback even if decoding finishes later.
+      if (spoken && !recording) cue.missed = true;
+      if (cue.missed && clue < FIRST_NEW_RECORDING) return;
       if (this.muted) return;
       const anchor = this.radioAnchor;
       if (anchor && Math.abs(elapsed - (anchor.elapsed + now - anchor.at)) < 0.30) return;
       this.clearRadio();
-      if (!spoken) this.prepareRadio(true);
-      const buffer = spoken ? recording : this.radioBuffer;
-      const rate = spoken ? 1 : clamp(RADIO_LENGTH / duration, 0.5, 2);
+      const rate = spoken ? 1 : clamp(RADIO_LENGTH / (duration - radioAt), 0.5, 2);
       const startsAt = Math.max(now, this.radioTail?.stopAt ?? now);
       const playhead = elapsed + (startsAt - now);
       const offset = (playhead - radioAt) * rate;
-      if (playhead >= duration || offset >= buffer.duration - 0.015) return;
+      if (playhead >= duration || (cue.missed && offset >= STATIC_LENGTH - 0.015)) return;
+      if (!spoken) this.prepareRadio(true);
+      if (cue.missed) this.staticBuffer ||= renderStatic(this.context);
+      const buffer = cue.missed ? this.staticBuffer : spoken ? recording : this.radioBuffer;
+      if (offset >= buffer.duration - 0.015) return;
       const voice = this.makeVoice(buffer, this.master, () => {
         if (this.radioVoice === voice) this.radioVoice = null;
       });
@@ -677,11 +703,11 @@
       try {
         const clips = await loadRecordings();
         if (this.context !== context) return;
-        clips.forEach(async (clip, index) => {
+        Object.entries(clips).forEach(async ([key, clip]) => {
           try {
             const data = Uint8Array.from(root.atob(clip), character => character.charCodeAt(0));
             const buffer = await context.decodeAudioData(data.buffer);
-            if (this.context === context) this.spokenRadio.set(index + 2, buffer);
+            if (this.context === context) this.spokenRadio.set(Number(key), buffer);
           } catch {
             // A damaged recording affects only its own cue.
           }
@@ -747,6 +773,7 @@
       for (const node of [this.mediaSource, this.musicGain, this.filter, this.musicDuck, this.master]) node?.disconnect();
       this.activeMusic = this.mix = null;
       this.radioVoice = this.radioAnchor = this.radioBuffer = null;
+      this.staticBuffer = null;
       this.radioJob = null;
       this.impactBuffers.clear();
       this.spokenRadio.clear();

@@ -51,7 +51,10 @@ test('app keyboard and separate timed swipes play every ordinary launch tier', (
     for (const [seed, touch] of [[187, false], [42, true]]) {
       const player = appPlayer(runner, { seed, touch, discoveredClues, swipeFrames: 4 });
       assert.equal(player.run.baseSpeed, speed);
-      const { passed } = play(player, courses, 26, {
+      assert.equal(player.run.musicTierFloor, discoveredClues + 1);
+      // The migrated beacon save drains for the newly eligible Pattern before the opening can continue.
+      const duration = discoveredClues === 4 ? 40 : 26;
+      const { passed } = play(player, courses, duration, {
         ...runner, boost: !touch, sweepRefuge: touch, forkGate: touch,
       });
       assert.ok(passed.length >= 2);
@@ -64,35 +67,61 @@ test('app keyboard and separate timed swipes play every ordinary launch tier', (
   assert.ok(passed.some(({ name, speed, boostedGate }) => name === 'duck-cross-duck' && speed >= 572 && boostedGate));
 });
 
-test('the ordinary app keeps generating through live clues and at high speed', () => {
-  const duration = 385;
+test('the ordinary app keeps generating through all nine live clues and at high speed', (t) => {
+  assert.equal(CLUES.length, 9);
+  const duration = 575;
+  const queuedClues = new WeakMap();
+  const request = runner.Run.prototype.requestTransmission;
+  t.mock.method(runner.Run.prototype, 'requestTransmission', function (duration, ordinal) {
+    const accepted = request.call(this, duration, ordinal);
+    if (accepted) queuedClues.set(this, ordinal);
+    return accepted;
+  });
   for (const discoveredClues of [0, 2, 4]) {
     const player = appPlayer(runner, { seed: 187, discoveredClues });
     const { run, step } = player;
+    const legacyHeard = [1, 2, 3, 5].slice(0, discoveredClues);
+    const pending = CLUES.map((_, index) => index + 1).filter((ordinal) => !legacyHeard.includes(ordinal));
+    const storedMeters = CLUES[discoveredClues - 1]?.meters ?? 0;
     const completed = [];
+    let latestStage = discoveredClues;
     let phase;
     let pausedId;
     let playbackAt;
+    let queuedAt;
+    let queuedClue;
     player.step = () => {
       step();
       assert.ok(player.frames < (duration + 15) * 60, 'The app run clock keeps advancing');
       const transmission = run.transmission;
       const nextPhase = transmission?.phase;
-      if (nextPhase === 'draining' && phase !== 'draining') pausedId = run.id;
+      if (nextPhase === 'draining' && phase !== 'draining') {
+        pausedId = run.id;
+        queuedAt = run.time;
+        queuedClue = queuedClues.get(run);
+        assert.equal(queuedClue, pending[completed.length], 'Every queued transmission is the next eligible, unheard clue');
+        const clue = CLUES[queuedClue - 1];
+        assert.ok(storedMeters + run.distance >= clue.meters, 'The run reaches the cumulative clue threshold');
+        assert.equal(transmission.duration, clue.duration);
+      }
       if (nextPhase === 'draining' || nextPhase === 'playing') {
         assert.equal(run.id, pausedId, 'Spawning pauses while the course drains and the clue plays');
+        assert.equal(run.forecastObstacles.length, 0, 'There are no distant hazards on the safe runway');
       }
       if (nextPhase === 'playing' && phase !== 'playing') {
         playbackAt = run.time;
+        assert.ok(playbackAt - queuedAt < 9, 'The committed encounter clears within nine seconds');
         assert.ok(run.obstacles.every(({ z, end = z }) => end < run.distance), 'Playback begins on cleared track');
       }
       const firstAhead = run.obstacles.find(({ z, end = z }) => end > run.distance);
       if (nextPhase === 'complete' && phase !== 'complete') {
-        const expectedClue = discoveredClues + completed.length + 1;
-        assert.equal(player.latestClue, expectedClue, 'The app discovers the completed clue');
-        assert.ok(Math.abs(run.time - playbackAt - CLUES[expectedClue - 1].duration) < runner.STEP);
+        const clue = CLUES[queuedClue - 1];
+        latestStage = Math.max(latestStage, clue.presentationStage);
+        assert.equal(player.latestClue, latestStage, 'The app renders the highest completed presentation stage');
+        assert.ok(Math.abs(run.time - playbackAt - clue.duration) < runner.STEP);
         assert.ok(firstAhead?.z > run.distance + run.viewDistance, 'The returning row gets a full warning horizon');
-        completed.push(expectedClue);
+        assert.ok(run.forecastObstacles.length > 0, 'The real runway returns with the first committed row');
+        completed.push(queuedClue);
       }
       if (!nextPhase || nextPhase === 'complete') {
         assert.ok(firstAhead, `No obstacles ahead at ${run.distance.toFixed(1)} m with ${discoveredClues} saved clues`);
@@ -100,8 +129,8 @@ test('the ordinary app keeps generating through live clues and at high speed', (
       phase = nextPhase;
     };
     const { passed } = play(player, courses, duration, runner);
-    assert.deepEqual(completed, CLUES.slice(discoveredClues).map((_, index) => discoveredClues + index + 1));
-    assert.equal(player.latestClue, CLUES.length);
+    assert.deepEqual(completed, pending);
+    assert.equal(player.latestClue, 4);
     const fastSections = passed.filter(({ speed }) => speed >= 572);
     assert.ok(fastSections.length >= 10, 'Playable sections span multiple late-tier bags');
     assert.equal(new Set(fastSections.map(({ name }) => name)).size, 5);

@@ -12,7 +12,8 @@
   const ENDLESS_START_SPEED = 48;
   const ADVANCED_START_SPEED = 80;
   const ENDLESS_LAUNCH_SPEEDS = [ENDLESS_START_SPEED, ADVANCED_START_SPEED, 112, 144, 176];
-  const CLUE_COUNT = ENDLESS_LAUNCH_SPEEDS.length - 1;
+  const MAX_LAUNCH_LEVEL = ENDLESS_LAUNCH_SPEEDS.length - 1;
+  const DEFAULT_TRANSMISSION_COUNT = 4;
   const FAST_START_SPEED = 64;
   const HIGH_SPEED_QA = 572;
   const ACCELERATION = 1.8;
@@ -26,6 +27,7 @@
   const SLIDE_DISTANCE = 14;
   const SLIDE_BRAKE_FRACTION = 0.08;
   const MAX_SLIDE_BRAKE = 12;
+  const MAX_BRAKE_AT = MAX_SLIDE_BRAKE / SLIDE_BRAKE_FRACTION;
   const BOOST_TIME = 0.85;
   const BOOST_SPEED = 15;
   const DASH_TIME = 0.7;
@@ -91,6 +93,7 @@
   const MIN_CLOSURE_INTERVAL = 3.55;
   const MIN_VIEW_DISTANCE = 186;
   const VIEW_SECONDS = 2.6;
+  const RUNWAY_RANGE_MULTIPLIER = 16;
   const REACTION_TIME = 0.86;
   const ROW_BUFFER = 3;
   const LANES = Array.from({ length: LANE_COUNT }, (_, lane) => lane);
@@ -139,14 +142,6 @@
 
   function sightDistance(baseSpeed) {
     return Math.max(MIN_VIEW_DISTANCE, forwardEnvelope(baseSpeed + MAX_EXTRA_SPEED, VIEW_SECONDS));
-  }
-
-  function randomFor(seed) {
-    let state = seed >>> 0;
-    return () => {
-      state = (Math.imul(1664525, state) + 1013904223) >>> 0;
-      return state / 4294967296;
-    };
   }
 
   function axisInterval(from, to, min, max) {
@@ -368,18 +363,33 @@
     #landingSlide = null;
     #transmissionClearAfter = -Infinity;
     #transmissionTicks = 0;
-    #lastTransmissionClue = 0;
+    #requestedTransmissions = new Set();
+    #transmissionCount;
+    #courseAnchor;
+    #planningCourse = false;
+    #forecast = [];
+    #forecastRows = [];
+    // An ID stays reserved even if a transmission clears its forecast row.
+    #nextObstacleId = 0;
 
     constructor({ seed = Date.now(), scenario = '', pace = '', advanced = false,
-      discoveredClues = advanced ? 1 : 0, onEvent = () => {} } = {}) {
+      discoveredClues = advanced ? 1 : 0, launchLevel, transmissionCount = DEFAULT_TRANSMISSION_COUNT,
+      onEvent = () => {} } = {}) {
+      if (!Number.isSafeInteger(transmissionCount) || transmissionCount < 1) {
+        throw new RangeError('Transmission count must be a positive safe integer');
+      }
+      this.#transmissionCount = transmissionCount;
+      if (launchLevel === undefined) {
+        launchLevel = Number.isFinite(discoveredClues) ?
+          Math.min(MAX_LAUNCH_LEVEL, Math.max(0, Math.floor(discoveredClues))) : 0;
+      } else if (!Number.isInteger(launchLevel) || launchLevel < 0 || launchLevel > MAX_LAUNCH_LEVEL) {
+        throw new RangeError('Launch level must be an integer from 0 to ' + MAX_LAUNCH_LEVEL);
+      }
       const challenge = scenario === 'challenge';
       this.scripted = Object.hasOwn(scenarios, scenario);
       this.endless = !this.scripted || challenge;
-      let launchLevel = 0;
       if (challenge) launchLevel = pace === 'fast' ? 4 : 3;
-      else if (!this.scripted && Number.isFinite(discoveredClues)) {
-        launchLevel = Math.min(CLUE_COUNT, Math.max(0, Math.floor(discoveredClues)));
-      }
+      else if (this.scripted) launchLevel = 0;
       const clueOpening = CLUE_OPENINGS[launchLevel - 1];
       this.advanced = launchLevel > 0;
       this.courseTierFloor = launchLevel + 1;
@@ -406,7 +416,7 @@
       this.crash = null;
       this.transmission = null;
       this.onEvent = onEvent;
-      this.random = randomFor(seed);
+      this.randomState = seed >>> 0;
       this.obstacles = [];
       this.openLanes = this.advanced ? [...LANES] : LANES.filter((lane) => lane !== 2);
       this.openingSweeps = seed & 1 ? [...OPENING_SWEEPS] :
@@ -449,20 +459,51 @@
       this.lastHazardEnd ??= this.obstacles.at(-1)?.end ?? this.obstacles.at(-1)?.z ?? 0;
       // Keep the standard opening's approach time even at the advanced launch speed.
       const firstRowAt = this.advanced ? Math.ceil(forwardEnvelope(this.baseSpeed, 1.6)) + ROW_BUFFER : 0;
+      this.#anchorCourse();
       this.populate(firstRowAt);
       bolts.init(this, seed);
     }
 
     addObstacle(z, lane, type, span = {}) {
-      this.obstacles.push({ id: this.id++, z, lane, type, ...span });
+      if (!this.#planningCourse) this.#clearForecast();
+      this.obstacles.push({ id: this.#nextObstacleId++, z, lane, type, ...span });
+      this.id = this.#nextObstacleId;
+    }
+
+    random() {
+      this.randomState = (Math.imul(1664525, this.randomState) + 1013904223) >>> 0;
+      return this.randomState / 4294967296;
+    }
+
+    #anchorCourse() {
+      this.#courseAnchor = { distance: this.distance, speed: this.baseSpeed, time: this.time };
     }
 
     upperBaseAt(z) {
-      return Math.sqrt(this.baseSpeed ** 2 + 2 * ACCELERATION * Math.max(0, z - this.distance));
+      if (!this.#planningCourse) {
+        return Math.sqrt(this.baseSpeed ** 2 + 2 * ACCELERATION * Math.max(0, z - this.distance));
+      }
+      const { distance, speed } = this.#courseAnchor;
+      const travel = Math.max(0, z - distance);
+      // Sustained braking takes the longest to cover a distance, so base speed can rise the most.
+      const belowCap = (1 - SLIDE_BRAKE_FRACTION) * Math.max(0, MAX_BRAKE_AT ** 2 - speed ** 2) / (2 * ACCELERATION);
+      if (travel < belowCap) return Math.sqrt(speed ** 2 + 2 * ACCELERATION * travel / (1 - SLIDE_BRAKE_FRACTION));
+      const brakedSpeed = Math.max(speed, MAX_BRAKE_AT) - MAX_SLIDE_BRAKE;
+      return MAX_SLIDE_BRAKE + Math.sqrt(brakedSpeed ** 2 + 2 * ACCELERATION * (travel - belowCap));
+    }
+
+    courseTimeAt(z) {
+      const { distance, speed, time } = this.#courseAnchor;
+      const travel = Math.max(0, z - distance);
+      return time + 2 * travel / (speed + Math.sqrt(speed ** 2 + 2 * ACCELERATION * travel));
     }
 
     get viewDistance() {
       return sightDistance(this.baseSpeed);
+    }
+
+    get forecastObstacles() {
+      return this.#forecast;
     }
 
     addSpikes(z, lane, tiles, lanes) {
@@ -507,81 +548,144 @@
 
     populate(firstRowAt = 0) {
       if (!this.endless || (this.transmission && this.transmission.phase !== 'complete')) return;
-      while (this.lastHazardEnd < this.distance + this.viewDistance) {
-        const previousEnd = this.lastHazardEnd;
-        const gap = this.rowClearance(previousEnd);
-        const variation = Math.floor(this.random() * (this.upperBaseAt(previousEnd) + MAX_EXTRA_SPEED) * 0.08);
-        const z = Math.max(firstRowAt, previousEnd + gap + variation);
-        // Lookahead can generate a row well before the runner reaches its difficulty gate.
-        const difficulty = COURSE_DIFFICULTIES.find((stage) =>
-          z >= stage.distance || (this.advanced && stage === ADVANCED_OPENING_DIFFICULTY));
-
-        if (this.closure) {
-          const { lane, throughLane, end } = this.closure;
-          if (end - z >= this.rowClearance(z)) {
-            this.lastHazardEnd = z;
-            this.addStandardRow(z, difficulty.closureCount, lane, throughLane);
-          } else {
-            this.lastHazardEnd = end;
-            this.openLanes = LANES.filter((next) => next !== lane);
-            this.closure = null;
-          }
-          continue;
-        }
-
-        this.lastHazardEnd = z;
-        const openingRow = this.advancedOpening[this.advancedOpeningIndex];
-        if (openingRow) {
-          // A promoted opening only needs a few familiar rows before its tier's combinations.
-          if (this.advancedOpeningIndex >= 3 && encounters.placeEncounter(this, z)) this.advancedOpening.length = 0;
-          else {
-            this.addAdvancedOpeningRow(z, openingRow);
-            this.advancedOpeningIndex++;
-          }
-          continue;
-        }
-
-        const intro = HAZARD_INTRODUCTIONS[this.introduction];
-        if (intro && z >= intro.distance) {
-          this.introduction++;
-          if (intro.type === 'closure') this.placeClosureRow(z, 2);
-          else this.placeSpikeRow(z, 2, intro.tiles, intro.lanes);
-          continue;
-        }
-
-        const sweep = intro && this.openingSweeps.shift();
-        if (sweep) {
-          const [hurdleLane, barrierLane] = sweep;
-          this.addObstacle(z, hurdleLane, 'hurdle');
-          this.addObstacle(z, barrierLane, 'barrier');
-          this.openLanes = LANES.filter((lane) => !sweep.includes(lane));
-          continue;
-        }
-
-        if (previousEnd >= this.nextEncounter && (!intro || this.introduction > 0) && encounters.placeEncounter(this, z)) continue;
-
-        if (!intro && (z >= this.nextClosure || this.shortGapDue || z >= this.nextSpikes)) {
-          const closure = z >= this.nextClosure;
-          const shortGap = !closure && this.shortGapDue;
-          const width = !closure && !shortGap && this.random() < difficulty.wideChance ? 2 : 1;
-          const candidates = LANES.filter((lane) => lane + width <= LANE_COUNT && this.reachable(
-            LANES.filter((next) => next < lane || next >= lane + width)
-          ));
-          const lane = candidates[Math.floor(this.random() * candidates.length)];
-          if (lane !== undefined) {
-            if (closure) this.placeClosureRow(z, lane);
-            else if (shortGap) {
-              const length = Math.floor(this.upperBaseAt(z) * SHORT_GAP_SECONDS);
-              this.lastHazardEnd = this.addClosure(z, lane, length, true);
-              this.openLanes = LANES.filter((next) => next !== lane);
-              this.shortGapDue = false;
-            } else this.placeSpikeRow(z, lane, this.random() < difficulty.longChance ? 2 : 1, width);
-            continue;
-          }
-        }
-
-        this.addStandardRow(z, difficulty.standardCount);
+      const liveEnd = this.distance + this.viewDistance;
+      const forecastEnd = this.distance + this.viewDistance * RUNWAY_RANGE_MULTIPLIER;
+      // Promote whole generator batches with their original obstacle objects and exit state.
+      let rows = 0;
+      let count = 0;
+      while (rows < this.#forecastRows.length && this.lastHazardEnd < liveEnd) {
+        const row = this.#forecastRows[rows++];
+        Object.assign(this, row.state);
+        count += row.count;
       }
+      if (rows) {
+        this.#forecastRows.splice(0, rows);
+        this.obstacles.push(...this.#forecast.splice(0, count));
+      }
+
+      if ((this.#forecastRows.at(-1)?.state.lastHazardEnd ?? this.lastHazardEnd) >= forecastEnd) return;
+
+      this.#planningCourse = true;
+      try {
+        // Keep the original live horizon. Rows, closures and entire encounters still commit as a unit.
+        while (this.lastHazardEnd < liveEnd) {
+          this.id = this.#nextObstacleId;
+          this.#generateRow(firstRowAt);
+        }
+        this.#extendForecast(forecastEnd);
+      } finally {
+        this.#planningCourse = false;
+      }
+    }
+
+    #courseState() {
+      const { id, randomState, introduction, nextSpikes, nextClosure, closure, shortGapDue, lastHazardEnd,
+        nextEncounter, openLanes, openingSweeps, advancedOpening, advancedOpeningIndex, encounterHistory } = this;
+      return { id, randomState, introduction, nextSpikes, nextClosure, closure, shortGapDue, lastHazardEnd,
+        nextEncounter, openLanes, openingSweeps, advancedOpening, advancedOpeningIndex, encounterHistory };
+    }
+
+    #clearForecast() {
+      this.#forecast.length = 0;
+      this.#forecastRows.length = 0;
+    }
+
+    #extendForecast(end) {
+      // Extend the saved tail with the same generator, then restore the live frontier.
+      const live = this.#courseState();
+      const obstacles = this.obstacles;
+      this.obstacles = obstacles.concat(this.#forecast);
+      Object.assign(this, this.#forecastRows.at(-1)?.state);
+      try {
+        while (this.lastHazardEnd < end) {
+          const start = this.obstacles.length;
+          this.id = this.#nextObstacleId;
+          this.#generateRow(0);
+          const added = this.obstacles.slice(start);
+          this.#forecast.push(...added);
+          this.#forecastRows.push({ state: this.#courseState(), count: added.length });
+        }
+      } finally {
+        this.obstacles = obstacles;
+        Object.assign(this, live);
+      }
+    }
+
+    #generateRow(firstRowAt) {
+      const previousEnd = this.lastHazardEnd;
+      const gap = this.rowClearance(previousEnd);
+      const variation = Math.floor(this.random() * (this.upperBaseAt(previousEnd) + MAX_EXTRA_SPEED) * 0.08);
+      const z = Math.max(firstRowAt, previousEnd + gap + variation);
+      // Lookahead can generate a row well before the runner reaches its difficulty gate.
+      const difficulty = COURSE_DIFFICULTIES.find((stage) =>
+        z >= stage.distance || (this.advanced && stage === ADVANCED_OPENING_DIFFICULTY));
+
+      if (this.closure) {
+        const { lane, throughLane, end } = this.closure;
+        if (end - z >= this.rowClearance(z)) {
+          this.lastHazardEnd = z;
+          this.addStandardRow(z, difficulty.closureCount, lane, throughLane);
+        } else {
+          this.lastHazardEnd = end;
+          this.openLanes = LANES.filter((next) => next !== lane);
+          this.closure = null;
+        }
+        return;
+      }
+
+      this.lastHazardEnd = z;
+      const openingRow = this.advancedOpening[this.advancedOpeningIndex];
+      if (openingRow) {
+        // A promoted opening only needs a few familiar rows before its tier's combinations.
+        if (this.advancedOpeningIndex >= 3 && encounters.placeEncounter(this, z)) this.advancedOpening = [];
+        else {
+          this.addAdvancedOpeningRow(z, openingRow);
+          this.advancedOpeningIndex++;
+        }
+        return;
+      }
+
+      const intro = HAZARD_INTRODUCTIONS[this.introduction];
+      if (intro && z >= intro.distance) {
+        this.introduction++;
+        if (intro.type === 'closure') this.placeClosureRow(z, 2);
+        else this.placeSpikeRow(z, 2, intro.tiles, intro.lanes);
+        return;
+      }
+
+      const sweep = intro && this.openingSweeps[0];
+      if (sweep) {
+        this.openingSweeps = this.openingSweeps.slice(1);
+        const [hurdleLane, barrierLane] = sweep;
+        this.addObstacle(z, hurdleLane, 'hurdle');
+        this.addObstacle(z, barrierLane, 'barrier');
+        this.openLanes = LANES.filter((lane) => !sweep.includes(lane));
+        return;
+      }
+
+      if (previousEnd >= this.nextEncounter && (!intro || this.introduction > 0) && encounters.placeEncounter(this, z)) return;
+
+      if (!intro && (z >= this.nextClosure || this.shortGapDue || z >= this.nextSpikes)) {
+        const closure = z >= this.nextClosure;
+        const shortGap = !closure && this.shortGapDue;
+        const width = !closure && !shortGap && this.random() < difficulty.wideChance ? 2 : 1;
+        const candidates = LANES.filter((lane) => lane + width <= LANE_COUNT && this.reachable(
+          LANES.filter((next) => next < lane || next >= lane + width)
+        ));
+        const lane = candidates[Math.floor(this.random() * candidates.length)];
+        if (lane !== undefined) {
+          if (closure) this.placeClosureRow(z, lane);
+          else if (shortGap) {
+            const length = Math.floor(this.upperBaseAt(z) * SHORT_GAP_SECONDS);
+            this.lastHazardEnd = this.addClosure(z, lane, length, true);
+            this.openLanes = LANES.filter((next) => next !== lane);
+            this.shortGapDue = false;
+          } else this.placeSpikeRow(z, lane, this.random() < difficulty.longChance ? 2 : 1, width);
+          return;
+        }
+      }
+
+      this.addStandardRow(z, difficulty.standardCount);
     }
 
     addAdvancedOpeningRow(z, { openLanes, spikes }) {
@@ -625,14 +729,16 @@
       if (!Number.isFinite(duration) || duration <= 0) {
         throw new RangeError('Transmission duration must be finite and positive');
       }
-      if (!Number.isInteger(clueNumber) || clueNumber <= this.#lastTransmissionClue || clueNumber > CLUE_COUNT ||
-        this.crash || (this.transmission && this.transmission.phase !== 'complete')) return false;
+      if (!Number.isInteger(clueNumber) || clueNumber < 1 || clueNumber > this.#transmissionCount ||
+        this.#requestedTransmissions.has(clueNumber) || this.crash ||
+        (this.transmission && this.transmission.phase !== 'complete')) return false;
+      this.#clearForecast();
       this.#transmissionClearAfter = this.obstacles.reduce((edge, obstacle) => {
         // Gaps stop colliding at the runner's center. Playback waits for its rear to clear the lip.
         const rearClearance = obstacle.type === 'gap' ? PLAYER_HALF_DEPTH : 0;
         return Math.max(edge, farCollisionEdge(obstacle) + rearClearance);
       }, -Infinity);
-      this.#lastTransmissionClue = clueNumber;
+      this.#requestedTransmissions.add(clueNumber);
       this.#transmissionTicks = 0;
       this.transmission = { phase: 'draining', elapsed: 0, duration };
       return true;
@@ -640,11 +746,13 @@
 
     resumeCourse() {
       // Start the first row beyond the full view horizon and leave room for its front collider.
+      this.#clearForecast();
+      this.#anchorCourse();
       const firstRowAt = this.distance + this.viewDistance + ROW_BUFFER;
       this.lastHazardEnd = this.distance;
       this.openLanes = [...LANES];
-      this.openingSweeps.length = 0;
-      this.advancedOpening.length = 0;
+      this.openingSweeps = [];
+      this.advancedOpening = [];
       this.closure = null;
       this.shortGapDue = false;
       // Re-enter through ordinary rows before a committed sequence. Stacked clues can drain this short section.
@@ -889,6 +997,7 @@
       const nominalEnd = startsSlide ? slideStart + SLIDE_DISTANCE / travel : (this.slideEndDistance - from.z) / travel;
       const gates = sweeps.filter(({ obstacle }) => obstacle.type === 'slideGate').sort((a, b) => a.enter - b.enter);
       const { end: slideEnd, engaged } = this.#gateCrouch(from, to, gates, slideStart, nominalEnd);
+      const pickupMotion = { segments: motion.segments, slideStart, slideEnd, step: STEP };
       const contacts = [];
       for (const sweep of sweeps) {
         const at = contactFraction(sweep, from, to, motion, slideStart, slideEnd);
@@ -945,7 +1054,7 @@
         this.crash = obstacle;
         this.#queuedSlide = null;
         this.#landingSlide = null;
-        bolts.update(this, from, { x, y, z });
+        bolts.update(this, from, { x, y, z }, startTime, impactTime, pickupMotion);
         this.onEvent('crash', { ...obstacle, impact: { x, y, z }, impactTime });
         return;
       }
@@ -975,14 +1084,14 @@
         this.obstacles = this.obstacles.filter((obstacle) => (obstacle.end ?? obstacle.z) >= rearLimit);
       }
       this.updateCourse();
-      bolts.update(this, from, to);
+      bolts.update(this, from, to, startTime, this.time, pickupMotion);
     }
   }
 
   const api = { Run, STEP, LANE_WIDTH, LANE_COUNT, START_SPEED, ENDLESS_START_SPEED, ADVANCED_START_SPEED, FAST_START_SPEED,
-    MAX_EXTRA_SPEED, REACTION_TIME, MIN_VIEW_DISTANCE, VIEW_SECONDS, SPIKE_HEIGHT, PLATFORM_HEIGHT, PLATFORM_HALF_WIDTH,
+    MAX_EXTRA_SPEED, REACTION_TIME, MIN_VIEW_DISTANCE, VIEW_SECONDS, RUNWAY_RANGE_MULTIPLIER, SPIKE_HEIGHT, PLATFORM_HEIGHT, PLATFORM_HALF_WIDTH,
     SLIDE_GATE_CLEARANCE, SLIDE_GATE_HEIGHT, SLIDE_GATE_HALF_WIDTH, BLACK_HOLE_HALF_WIDTH, BLACK_HOLE_HALF_DEPTH,
-    SLIDE_DISTANCE, slideGateBounds, laneX, movingBarrierX, obstacles };
+    SLIDE_DISTANCE, slideGateBounds, laneX, movingBarrierX, obstacles, boltPositionAt: bolts.positionAt };
   if (commonJS) module.exports = api;
   else globalThis.VoidRunner = api;
 })();

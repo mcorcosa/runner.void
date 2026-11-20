@@ -105,13 +105,15 @@ function playback() {
   let course;
   let current;
   let sheet;
-  const stagedThought = new URLSearchParams(location.search).has('qa-stage3');
-  if (stagedThought) {
+  const thoughtStageParam = new URLSearchParams(location.search).get('qa-thought-stage');
+  if (thoughtStageParam !== null) {
+    const thoughtStage = Number(thoughtStageParam);
     Object.defineProperty(window, 'VoidEpisode', {
       configurable: true,
       set(api) {
+        localStorage.clear();
         localStorage.setItem(api.SAVE_KEY + ':v2:checkpoint', JSON.stringify({
-          version: 2, discoveredClues: 3, meters: api.CLUES[2].meters,
+          version: 2, discoveredClues: thoughtStage, meters: api.CLUES[thoughtStage - 1]?.meters ?? 0,
         }));
         Object.defineProperty(window, 'VoidEpisode', { value: api });
       },
@@ -125,7 +127,7 @@ function playback() {
         constructor(options) {
           super(options);
           if (!course) return;
-          if (stagedThought) this.obstacles.length = 0;
+          if (thoughtStageParam !== null) this.obstacles.length = 0;
           const { type, speed } = course;
           this.baseSpeed = this.speed = speed;
           const seconds = 1.96;
@@ -160,6 +162,7 @@ function playback() {
     shade: document.querySelector('#death-shade')?.style.opacity,
     shadeHidden: document.querySelector('#death-shade')?.hidden,
     thought: document.querySelector('#death-thought')?.textContent,
+    thoughtShadow: document.querySelector('#death-thought')?.style.textShadow,
   });
   const tile = { width: 248, height: 153 };
   window.deathQA = {
@@ -195,12 +198,19 @@ function playback() {
       const bottom = Math.max(...lines.map((line) => line.bottom));
       const left = Math.min(...lines.map((line) => line.left));
       const right = Math.max(...lines.map((line) => line.right));
+      const hudBottom = document.getElementById('hud').getBoundingClientRect().bottom;
+      const horizon = current.scene.horizon;
       return {
+        viewport: [innerWidth, innerHeight],
         lineCount: lines.length,
         fontSize: getComputedStyle(thought).fontSize,
-        hudClearance: Math.round(top - document.getElementById('hud').getBoundingClientRect().bottom),
-        horizonClearance: Math.round(current.scene.horizon - bottom),
+        hudClearance: Math.round(top - hudBottom),
+        horizonClearance: Math.round(horizon - bottom),
+        viewportClearance: Math.floor(Math.min(left, top, innerWidth - right, innerHeight - bottom)),
         centerOffset: Math.round((left + right - innerWidth) / 2),
+        textBounds: [left, top, right, bottom].map(Math.round),
+        hudBottom: Math.round(hudBottom),
+        horizon: Math.round(horizon),
       };
     },
     sheet(rows, times, title) {
@@ -274,37 +284,76 @@ async function main() {
       const { data } = await browser.call('Page.captureScreenshot', { format: 'png' });
       await save(name, data);
     };
-    const captureThought = async (layout, speed, hazard, long, large) => {
-      await browser.navigate(`${origin}/?seed=187&${long ? 'qa-stage3' : 'scenario=landing'}`);
+    const longestPlacementFailures = [];
+    const captureThought = async (layout, speed, hazard, { stage = 0, large = false, reduced, baseline = false } = {}) => {
+      const longest = stage === 4;
+      await browser.navigate(`${origin}/?seed=187&${stage || baseline ? `qa-thought-stage=${stage}` : 'scenario=landing'}`);
       const start = async () => {
         const started = await evaluate('start', hazard, speed);
         assert.equal(started.mode, 'dying', JSON.stringify(started));
         assert.equal(started.type, hazard);
       };
       if (large) await browser.evaluate("document.documentElement.style.fontSize = '24px'");
-      if (long) {
+      const visit = [1, 0, 0, 2, 5][stage];
+      for (let previous = 1; previous < visit; previous++) {
         await start();
         assert.equal((await evaluate('finish', 3.85)).mode, 'ended');
       }
       await start();
+      const line = longest ? 'Did they have a way to get there?' :
+        stage ? 'How many times have they seen it?' : 'One white dot.';
+      let steady;
+      if (longest) {
+        assert.equal((await evaluate('layout')).reduced, reduced);
+        const before = await evaluate('finish', 1.45);
+        assert.equal(before.thought, reduced ? '' : line);
+        assert.equal(Boolean(before.thoughtShadow), !reduced);
+        steady = await evaluate('finish', 1.55);
+        assert.equal(steady.elapsed, 1.55);
+        assert.equal(steady.thought, line);
+        assert.equal(steady.thoughtShadow, '');
+      }
       const hold = await evaluate('finish', 3.15);
-      assert.equal(hold.thought, long ? 'How many times have they seen it?' : 'One white dot.');
+      assert.equal(hold.thought, line);
       assert.equal(hold.result, false);
-      const name = `${layout}-${speed}-${large ? 'large' : long ? 'long-standard' : 'standard'}-thought`;
+      const motion = reduced ? 'reduced' : 'motion';
+      const variant = baseline ? `baseline-${motion}` : longest ? `longest-${motion}${large ? '-large' : ''}` :
+        large ? 'large' : stage ? 'long-standard' : 'standard';
+      const name = `${layout}-${speed}-${variant}-thought`;
       await screenshot(name);
       const placement = await evaluate('thoughtLayout');
-      assert.ok(placement.hudClearance >= 12 && placement.horizonClearance >= 12, JSON.stringify(placement));
-      assert.equal(placement.lineCount, large && layout !== 'landscape' ? 2 : 1);
+      const clearsBounds = placement.hudClearance >= 12 && placement.horizonClearance >= 12 &&
+        placement.viewportClearance >= 12;
+      if (longest && !clearsBounds) longestPlacementFailures.push({ name, ...placement });
+      if (!longest && !baseline) assert.ok(clearsBounds, JSON.stringify(placement));
+      if (longest) assert.ok(placement.lineCount >= 1 && placement.lineCount <= 2, JSON.stringify(placement));
+      else assert.equal(placement.lineCount, large && layout !== 'landscape' ? 2 : 1);
       if (large) assert.equal(placement.fontSize, '27px');
-      else assert.ok(Math.abs(placement.centerOffset) <= 1, JSON.stringify(placement));
+      else if (!longest || !layout.startsWith('landscape')) {
+        assert.ok(Math.abs(placement.centerOffset) <= 1, JSON.stringify(placement));
+      }
+      if (longest) {
+        const last = await evaluate('finish', 3.73);
+        assert.equal(last.mode, 'dying');
+        assert.equal(last.thought, line);
+        assert.equal(last.thoughtShadow, '');
+        assert.equal(last.result, false);
+        assert.ok(last.elapsed - steady.elapsed >= 2.2 - 1 / 60 - 1e-9);
+        const ended = await evaluate('finish', 3.77);
+        assert.equal(ended.mode, 'ended');
+        assert.equal(ended.thought, '');
+        assert.equal(ended.result, true);
+      }
       console.log(name, placement);
+      return clearsBounds;
     };
     for (const { name: layout, width, height, touch } of selectedLayouts) {
       const angle = layout === 'landscape' ? 90 : 0;
       const type = layout === 'portrait' ? 'portraitPrimary' : 'landscapePrimary';
-      await browser.call('Emulation.setDeviceMetricsOverride', {
+      const metrics = {
         width, height, deviceScaleFactor: 1, mobile: touch, screenOrientation: { type, angle },
-      });
+      };
+      await browser.call('Emulation.setDeviceMetricsOverride', metrics);
       await browser.call('Emulation.setTouchEmulationEnabled', { enabled: touch, maxTouchPoints: 2 });
       for (const reduced of [false, true]) {
         await browser.call('Emulation.setEmulatedMedia', {
@@ -313,8 +362,19 @@ async function main() {
         if (thoughts) {
           const speed = reduced === (layout === 'portrait') ? 720 : 48;
           const hazard = filterCases[layout]?.[speed].hazard ?? 'hurdle';
-          await captureThought(layout, speed, hazard, reduced, reduced);
-          if (layout === 'landscape' && !reduced) await captureThought(layout, speed, hazard, true, false);
+          await captureThought(layout, speed, hazard, reduced ? { stage: 3, large: true } : {});
+          if (layout === 'landscape' && !reduced) await captureThought(layout, speed, hazard, { stage: 3 });
+          if (layout === 'portrait') {
+            await browser.call('Emulation.setDeviceMetricsOverride', { ...metrics, width: 320, height: 700 });
+          }
+          await captureThought(layout, speed, hazard, { stage: 4, reduced });
+          if (layout === 'landscape') {
+            if (reduced) await captureThought(layout, speed, hazard, { stage: 4, large: true, reduced });
+            await browser.call('Emulation.setDeviceMetricsOverride', { ...metrics, width: 568, height: 240 });
+            const fits = await captureThought('landscape-short', speed, hazard, { stage: 4, reduced });
+            if (!fits) await captureThought('landscape-short', speed, hazard, { baseline: true, reduced });
+          }
+          if (touch) await browser.call('Emulation.setDeviceMetricsOverride', metrics);
           continue;
         }
         await browser.navigate(`${origin}/?scenario=landing&seed=187`);
@@ -376,6 +436,7 @@ async function main() {
       }
     }
     console.log(output);
+    assert.deepEqual(longestPlacementFailures, [], 'Longest thought must clear the HUD, horizon and viewport edges by 12 px');
   } finally {
     instance?.socket.close();
     instance?.child.kill();

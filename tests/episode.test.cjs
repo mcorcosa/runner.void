@@ -12,6 +12,17 @@ const ENTRY = SAVE_KEY + ':v2:entry:';
 const RESET_KEY = SAVE_KEY + ':reset';
 const RESET_CHECKPOINT = SAVE_KEY + ':v3:checkpoint';
 const RESET_ENTRY = SAVE_KEY + ':v3:entry:';
+const HEARD_CHECKPOINT = SAVE_KEY + ':v4:checkpoint';
+const HEARD_ENTRY = SAVE_KEY + ':v4:entry:';
+
+function heardCheckpoint(store, meters, heard = [], { generation = null, bolts = 0 } = {}) {
+  store[HEARD_CHECKPOINT] = JSON.stringify({ version: 4, generation, meters, bolts, heard });
+  return store;
+}
+
+function caption({ line, followUp }) {
+  return followUp ? `${line}\n${followUp}` : line;
+}
 
 function storage(initial) {
   return Object.assign({
@@ -33,7 +44,7 @@ function storage(initial) {
 }
 
 function browser(query = '?seed=187', store = storage(), {
-  sound = true, databaseFactory, touch = false, origin = 'https://game.example',
+  sound = true, databaseFactory, touch = false, reduced = false, origin = 'https://game.example',
 } = {}) {
   const read = (file) => readFileSync(join(__dirname, '..', file), 'utf8');
   const events = [];
@@ -80,7 +91,8 @@ function browser(query = '?seed=187', store = storage(), {
   const context = vm.createContext({
     document, window, URLSearchParams, location: new URL(query, origin), HTMLButtonElement: Button,
     navigator: { userAgent: '', platform: '' }, indexedDB: databaseFactory,
-    matchMedia: (query) => ({ matches: touch && query === '(pointer: coarse)' }),
+    matchMedia: (query) => ({ matches: (touch && query === '(pointer: coarse)') ||
+      (reduced && query === '(prefers-reduced-motion: reduce)') }),
     ResizeObserver: class { observe() {} },
     requestAnimationFrame: (frame) => { nextFrame = frame; },
     VoidRunner: { ...require('../game.js'), Run: class extends Run {
@@ -210,58 +222,57 @@ function storageTransactions() {
 }
 
 test('episode records actual cumulative meters and writes only changed checkpoints', () => {
+  const threshold = CLUES[0].meters;
   const store = storage();
   const progress = new EpisodeProgress({ storage: store });
   progress.save();
   progress.discover(1);
   assert.equal(store.writes.length, 0);
-  progress.credit(4980.25);
-  progress.credit(4980.25);
+  progress.credit(threshold - 19.75);
+  progress.credit(threshold - 19.75);
   progress.save();
   progress.save();
-  assert.deepEqual(store.writes, [{ meters: 4980.25, status: 'locked' }]);
+  assert.deepEqual(store.writes, [{ meters: threshold - 19.75, status: 'locked' }]);
 
   const resumed = new EpisodeProgress({ storage: store });
   resumed.credit(19.5);
   assert.equal(resumed.pendingClue, null);
   resumed.credit(19.75);
-  assert.deepEqual(store.read(), { meters: 5000, status: 'pending' });
+  assert.deepEqual(store.read(), { meters: threshold, status: 'pending' });
   const pending = new EpisodeProgress({ storage: store });
   assert.equal(pending.pendingClue, 1);
   pending.credit(8.125);
   pending.discover(1);
   pending.discover(1);
-  assert.deepEqual(store.read(), { meters: 5008.125, status: 'discovered' });
+  assert.deepEqual(store.read(), { meters: threshold + 8.125, status: 'discovered' });
   assert.equal(store.writes.length, 3);
 });
 
 test('switching tabs preserves newer discovery and distance from both tabs', () => {
-  const store = storage();
-  store[CHECKPOINT] = JSON.stringify({ version: 2, meters: 4970, bolts: 0, discoveredClues: 0 });
+  const store = heardCheckpoint(storage(), 14970);
   const stale = new EpisodeProgress({ storage: store });
   const other = new EpisodeProgress({ storage: store });
   stale.credit(18.25);
   other.credit(35.25);
   other.discover(1);
-  assert.deepEqual(store.read(), { meters: 5005.25, status: 'discovered' });
+  assert.deepEqual(store.read(), { meters: 15005.25, status: 'discovered' });
   stale.save();
-  assert.deepEqual(store.read(), { meters: 5023.5, status: 'discovered' });
+  assert.deepEqual(store.read(), { meters: 15023.5, status: 'discovered' });
 
   other.credit(40.25);
   other.save();
-  assert.deepEqual(store.read(), { meters: 5028.5, status: 'discovered' });
+  assert.deepEqual(store.read(), { meters: 15028.5, status: 'discovered' });
   stale.beginRun();
   stale.credit(2.5);
   stale.save();
   stale.save();
-  assert.deepEqual(store.read(), { meters: 5031, status: 'discovered' });
+  assert.deepEqual(store.read(), { meters: 15031, status: 'discovered' });
   assert.equal(store.writes.length, 5);
 });
 
 test('collision credits partial impact distance, keeps clue pending, and retries on the next real run', () => {
-  const beforeImpact = 4950;
-  const store = storage();
-  store[CHECKPOINT] = JSON.stringify({ version: 2, meters: beforeImpact, bolts: 0, discoveredClues: 0 });
+  const beforeImpact = CLUES[0].meters - 50;
+  const store = heardCheckpoint(storage(), beforeImpact);
   const crashed = browser(undefined, store);
   assert.equal(crashed.run.speed, ENDLESS_START_SPEED);
   crashed.click('start');
@@ -310,6 +321,8 @@ test('collision credits partial impact distance, keeps clue pending, and retries
   while (recovered.run.lane !== nextHazard.lane) {
     recovered.key(recovered.run.lane > nextHazard.lane ? 'ArrowLeft' : 'ArrowRight');
   }
+  recovered.until(() => recovered.elements['death-thought'].textContent);
+  assert.equal(recovered.elements['death-thought'].textContent, 'A voice in all that hiss?');
   recovered.until(() => recovered.mode === 'ended');
   const beforeRestart = store.read().meters;
   recovered.click('restart');
@@ -496,52 +509,116 @@ test('death freezes the impact frame, keeps controls locked and gives the though
   assert.equal(page.run.lane, 1);
 });
 
-test('death thoughts alternate within each discovered stage and stay isolated in practice and preview', () => {
-  const byStage = [
-    ['One white dot.', 'I can still picture it.'],
-    ['A voice in all that hiss?', 'Almost made out a word.'],
-    ['Who was asking?', 'I had the same question.'],
-    ['They said “again.”', 'How many times have they seen it?'],
-    ['How far to the beacon?', 'Who did they mean by “we”?'],
-  ];
-  function readThought(page) {
-    const { run } = page;
-    run.obstacles.length = 0;
-    run.addObstacle(run.distance + 1, run.lane, 'hurdle');
-    page.until(() => page.mode === 'dying');
-    page.step(1, 1600);
-    page.step(1, 200);
-    return page.elements['death-thought'].textContent;
-  }
+function crashForThought(page) {
+  const { run } = page;
+  run.obstacles.length = 0;
+  run.addObstacle(run.distance + 1, run.lane, 'hurdle');
+  page.until(() => page.mode === 'dying');
+}
 
+function readThought(page) {
+  page.step(1, 1600);
+  page.step(1, 200);
+  return page.elements['death-thought'].textContent;
+}
+
+test('death thoughts follow the completed stage through a full eight-line rotation and wrap', () => {
+  const byStage = [
+    [
+      'One white dot.', 'I can still picture it.', 'Five lanes. One dot.', 'I could cover it with my thumb.',
+      'My eyes went there first.', 'I watched it instead of my feet.', 'Where does the track end?', 'Even when I blink.',
+    ],
+    [
+      'A voice in all that hiss?', 'Almost made out a word.', 'Was that a breath?', 'Static. Then something softer.',
+      'I leaned in to listen.', 'I almost said it back.', 'Where did the hiss end?', 'I caught the shape of a word.',
+    ],
+    [
+      'Who was asking?', 'I had the same question.', 'What did they mean by “that”?', 'Funny. I nearly answered.',
+      'They sounded as lost as me.', 'Did they see it too?', 'I could hear the question mark.',
+      'Who did they expect to answer?',
+    ],
+    [
+      'They said “again.”', 'How many times have they seen it?', 'Same light. A different run.',
+      'Which time did they mean?', 'I remember where I was looking.', 'Did it look familiar to them?',
+      'Maybe they looked away too.', 'I keep coming back to that word.',
+    ],
+    [
+      'How far to the beacon?', 'Who did they mean by “we”?', 'They sounded so sure this time.',
+      'Could my thumb still hide it?', 'Did they have a way to get there?', 'A light to steer by. For whom?',
+      'I heard every word this time.', 'Would I stop if I reached it?',
+    ],
+  ];
   for (const [stage, lines] of byStage.entries()) {
     const store = storage();
     store[CHECKPOINT] = JSON.stringify({ version: 2, meters: CLUES[stage - 1]?.meters ?? 0, discoveredClues: stage });
     const page = browser(undefined, store);
     page.click('start');
     page.step();
-    for (const line of lines) {
-      assert.equal(readThought(page), line);
+    for (const [visit, line] of [...lines, lines[0]].entries()) {
+      crashForThought(page);
+      assert.equal(readThought(page), line, `Stage ${stage}, death ${visit + 1}`);
       page.step(1, 2300);
       assert.equal(page.mode, 'ended');
+      if (stage > 0 && visit === 0) {
+        page.click(`replay-${stage === 4 ? 5 : stage}`);
+        page.step();
+        assert.equal(page.sound.transmissionClue, stage);
+        page.until(() => page.sound.transmissionClue === null);
+        assert.equal(store.progress().discoveredClues, stage);
+      }
       page.click('restart');
       page.step();
     }
-    if (stage !== 4) continue;
-    const before = store.read();
-    for (const query of ['?scenario=hurdle', '?pace=fast', '?preview=clue4']) {
-      const isolated = browser(query, store);
-      isolated.click('start');
-      isolated.step();
-      if (query.includes('preview')) {
-        isolated.until(() => isolated.run.transmission?.phase === 'complete');
-        assert.equal(isolated.starDiscovered, 4);
-      }
-      assert.equal(readThought(isolated), byStage[0][0]);
-      isolated.page('pagehide');
-      assert.deepEqual(store.read(), before);
-    }
+
+    const reloaded = browser(undefined, store);
+    reloaded.click('start');
+    reloaded.step();
+    crashForThought(reloaded);
+    assert.equal(readThought(reloaded), lines[0]);
   }
+});
+
+test('practice and preview death thoughts use stage zero even with all clues saved', () => {
+  const store = storage();
+  store[CHECKPOINT] = JSON.stringify({ version: 2, meters: CLUES[3].meters, discoveredClues: 4 });
+  const before = store.read();
+  for (const query of ['?scenario=hurdle', '?pace=fast', '?preview=clue4']) {
+    const isolated = browser(query, store);
+    isolated.click('start');
+    isolated.step();
+    if (query.includes('preview')) {
+      isolated.until(() => isolated.run.transmission?.phase === 'complete');
+      assert.equal(isolated.starDiscovered, 4);
+    }
+    crashForThought(isolated);
+    assert.equal(readThought(isolated), 'One white dot.');
+    isolated.page('pagehide');
+    assert.deepEqual(store.read(), before);
+  }
+});
+
+test('peer discovery changes the next death thought while the impact stage holds through death', () => {
+  const store = storage();
+  const page = browser(undefined, store);
+  page.click('start');
+  page.step();
+  crashForThought(page);
+  const peer = store.progress();
+  peer.credit(CLUES[0].meters);
+  peer.discover(1);
+  assert.equal(store.progress().discoveredClues, 1);
+  page.page('storage', { key: SAVE_KEY });
+  assert.equal(readThought(page), 'One white dot.');
+  assert.equal(page.starDiscovered, 0);
+  page.step(1, 2190);
+  assert.equal(page.elements['death-thought'].textContent, 'One white dot.');
+  page.step(1, 30);
+  assert.equal(page.mode, 'ended');
+  assert.equal(page.starDiscovered, 1);
+  page.click('restart');
+  page.step();
+  crashForThought(page);
+  assert.equal(readThought(page), 'A voice in all that hiss?');
 });
 
 test('peer reset keeps the thought selected at impact and clears the run after the hold', () => {
@@ -653,7 +730,7 @@ test('audio unlock precedes fullscreen and focused replay or mute retains native
   assert.equal(page.key('Enter', 'replay-1'), false);
   page.click('replay-1');
   assert.equal(shade.hidden, true);
-  assert.equal(page.elements['replay-1'].textContent, 'Stop clue 1');
+  assert.equal(page.elements['replay-1'].textContent, 'Stop 1');
   assert.equal(page.key('Enter', 'replay-1', true), true);
   page.step(30);
   assert.equal(page.mode, 'ended');
@@ -671,7 +748,7 @@ test('audio unlock precedes fullscreen and focused replay or mute retains native
   page.until(() => page.sound.transmissionTime === null);
   assert.equal(shade.hidden, false);
   assert.equal(page.sceneFrame.dt, 0);
-  assert.equal(page.elements['replay-1'].textContent, 'Replay clue 1');
+  assert.equal(page.elements['replay-1'].textContent, 'Clue 1');
   assert.equal(page.run, ended);
   assert.equal(500 + page.run.distance, persisted.meters);
   assert.deepEqual(store.read(), persisted);
@@ -727,7 +804,7 @@ test('foreground pause and lag at both safe-window boundaries keep simulation an
   assert.ok(page.run.distance - distance < page.run.speed * 0.026);
 });
 
-test('legacy pending survives below the modern threshold and exact thresholds queue in order', () => {
+test('legacy pending survives below the modern threshold, and all nine new boundaries queue in order', () => {
   const pending = storage({ meters: 150, status: 'pending' });
   const restored = pending.progress();
   assert.equal(restored.meters, 150);
@@ -739,17 +816,19 @@ test('legacy pending survives below the modern threshold and exact thresholds qu
   assert.equal(pending.progress().pendingClue, null);
 
   assert.deepEqual(CLUES.map(({ meters, duration }) => [meters, duration]),
-    [[5000, 8], [20000, 8], [50000, 10], [90000, 12]]);
+    [[15000, 8], [35000, 8], [65000, 10], [95000, 9], [125000, 12], [160000, 9],
+      [195000, 10], [230000, 9], [270000, 11]]);
   for (const [index, { meters }] of CLUES.entries()) {
-    const store = storage({ meters: index ? 500 : 0, status: index ? 'discovered' : 'locked' });
+    const store = storage();
     const active = store.progress();
-    const distance = meters - active.meters;
-    active.credit(distance - 0.25);
+    active.credit(meters - 1);
     assert.equal(active.eligibleClues, index);
-    active.credit(distance);
+    active.credit(meters);
     const reloaded = store.progress();
+    assert.equal(reloaded.meters, meters);
+    assert.equal(reloaded.discoveredClues, 0);
     assert.equal(reloaded.eligibleClues, index + 1);
-    for (let ordinal = index ? 2 : 1; ordinal <= index + 1; ordinal++) {
+    for (let ordinal = 1; ordinal <= index + 1; ordinal++) {
       assert.equal(reloaded.pendingClue, ordinal);
       reloaded.discover(ordinal);
     }
@@ -758,7 +837,8 @@ test('legacy pending survives below the modern threshold and exact thresholds qu
 });
 
 test('stacked cues finish live with a returning hazard between them and keep the launch profile until restart', () => {
-  const store = storage({ meters: 9010, status: 'locked' });
+  const earned = 270000;
+  const store = heardCheckpoint(storage(), earned);
   const page = browser(undefined, store);
   page.click('start');
   let returningRow;
@@ -766,24 +846,27 @@ test('stacked cues finish live with a returning hazard between them and keep the
     const ordinal = index + 1;
     page.until(() => {
       steerSafely(page);
-      return page.sound.transmissionClue === ordinal;
+      return page.sound.transmissionClue === clue.audioKey;
     }, 1500);
     const request = page.events.filter(([name]) => name === 'request').at(-1);
     assert.deepEqual(request.slice(3), [ordinal, clue.duration]);
     if (returningRow) assert.ok(request[1] >= returningRow.z + 2);
     assert.equal(store.progress().discoveredClues, index);
     assert.equal(page.starSignal.clueNumber, ordinal);
+    assert.equal(page.starSignal.presentationStage, clue.presentationStage);
+    assert.equal(page.starSignal.radioAt, clue.radioAt);
+    assert.equal(page.sound.transmissionRadioAt, clue.radioAt);
     assert.equal(page.sound.transmissionTime, 0);
     assert.equal(page.document.body.dataset.signalNoise, ordinal === 1 ? 'true' : 'false');
     page.until(() => page.sound.transmissionTime >= PULSE_LEAD);
     assert.equal(page.document.body.dataset.signalNoise, 'true');
-    assert.equal(page.document.body.dataset.signalInvert, ordinal === 4 ? 'true' : 'false');
+    assert.equal(page.document.body.dataset.signalInvert, String(clue.invert));
     assert.equal(page.elements['death-shade'].hidden, true);
-    assert.equal(page.elements['sky-signal'].textContent, clue.line);
+    assert.equal(page.elements['sky-signal'].textContent, caption(clue));
     assert.equal(store.progress().discoveredClues, index);
     page.until(() => page.run.transmission?.phase === 'complete');
     assert.equal(store.progress().discoveredClues, ordinal);
-    assert.equal(page.starDiscovered, ordinal);
+    assert.equal(page.starDiscovered, clue.presentationStage);
     assert.equal(page.starSignal, null);
     assert.equal(page.sound.musicTierFloor, 1);
     assert.ok(Math.abs(page.run.baseSpeed - (ENDLESS_START_SPEED + 1.8 * page.run.time)) < 1e-8);
@@ -791,22 +874,22 @@ test('stacked cues finish live with a returning hazard between them and keep the
     assert.ok(returningRow.z > page.run.distance + page.run.viewDistance);
   }
   assert.equal(store.progress().pendingClue, null);
-  assert.equal(page.events.filter(([name]) => name === 'request').length, 4);
+  assert.equal(page.events.filter(([name]) => name === 'request').length, 9);
   while (page.run.lane !== returningRow.lane) page.run.move(returningRow.lane - page.run.lane);
   page.until(() => page.mode === 'ended');
   const ended = page.run;
   const meters = store.progress().meters;
-  assert.ok(Math.abs(meters - (9010 + ended.distance)) < 1e-8);
+  assert.ok(Math.abs(meters - (earned + ended.distance)) < 1e-8);
   for (const [index, clue] of CLUES.entries()) {
     const ordinal = index + 1;
     const id = `replay-${ordinal}`;
     assert.equal(page.elements[id].hidden, false);
     page.click(id);
-    assert.equal(page.sound.transmissionClue, ordinal);
+    assert.equal(page.sound.transmissionClue, clue.audioKey);
     assert.equal(page.sound.transmissionDuration, clue.duration);
     assert.equal(page.document.body.dataset.signalNoise, ordinal === 1 ? 'true' : 'false');
     page.step(78);
-    assert.equal(page.elements['sky-signal'].textContent, clue.line);
+    assert.equal(page.elements['sky-signal'].textContent, caption(clue));
     assert.equal(page.document.body.dataset.signalNoise, 'true');
     assert.equal(store.progress().meters, meters);
     assert.equal(page.run, ended);
@@ -822,9 +905,13 @@ test('stacked cues finish live with a returning hazard between them and keep the
 
 test('each isolated preview uses its ordinal on clear track with a readable cue even without a soundtrack', () => {
   const store = storage({ meters: 9000, status: 'pending' });
-  const lines = ['', 'What is that?', 'Saw the light again', 'Still there. Looks like a beacon. We need to reach it'];
-  for (let ordinal = 1; ordinal <= CLUES.length; ordinal++) {
-    const page = browser(`?preview=clue${ordinal}`, store, { sound: false });
+  const lines = ['', 'What is that?', 'Saw the light again', 'Those pauses. Always the same.',
+    'Still there. Looks like a beacon. We need to reach it', 'What was it built to guide?', 'Leave it alone.\nTell the others.',
+    'What if it’s a warning?', 'We MUST reach it.\nFind out who sent this.'];
+  const queries = [...CLUES.map((_, index) => [String(index + 1), index + 1]), ['clue4', 5], ['beacon', 5], ['pattern', 4]];
+  for (const [query, ordinal] of queries) {
+    const clue = CLUES[ordinal - 1];
+    const page = browser(`?preview=${query}`, store, { sound: false });
     assert.equal(page.starDiscovered, 0);
     page.click('start');
     page.until(() => page.starSignal?.elapsed === 0);
@@ -833,14 +920,97 @@ test('each isolated preview uses its ordinal on clear track with a readable cue 
     assert.equal(page.run.obstacles.length, 0);
     page.until(() => page.starSignal?.elapsed >= PULSE_LEAD);
     assert.equal(page.elements['sky-signal'].textContent, lines[ordinal - 1]);
-    assert.equal(page.document.body.dataset.signalInvert, ordinal === 4 ? 'true' : 'false');
+    assert.equal(page.document.body.dataset.signalInvert, String(clue.invert));
     page.until(() => page.run.transmission?.phase === 'complete');
-    assert.equal(page.starDiscovered, ordinal);
+    assert.equal(page.starDiscovered, clue.presentationStage);
     page.page('pagehide');
   }
   assert.equal(store.progress().discoveredClues, 0);
   assert.equal(store.progress().meters, 9000);
   assert.equal(store.writes.length, 0);
+});
+
+test('grandfathered beacon can finish before pattern in the same run without downgrading launch or death knowledge', () => {
+  const store = storage();
+  store[CHECKPOINT] = JSON.stringify({ version: 2, meters: 90000, bolts: 0, discoveredClues: 3 });
+  const page = browser(undefined, store);
+  assert.equal(store.progress().pendingClue, 5);
+  page.click('start');
+  page.until(() => {
+    steerSafely(page);
+    return page.starSignal?.clueNumber === 5;
+  });
+  const peer = store.progress();
+  peer.credit(5000);
+  page.page('storage', { key: HEARD_ENTRY + 'peer' });
+  assert.equal(store.progress().pendingClue, 4);
+  page.until(() => page.run.transmission.phase === 'complete');
+  assert.equal(store.progress().hasHeard('beacon'), true);
+  assert.equal(store.progress().hasHeard('pattern'), false);
+  assert.equal(page.starDiscovered, 4);
+  page.until(() => {
+    steerSafely(page);
+    return page.starSignal?.clueNumber === 4;
+  }, 1500);
+  assert.equal(page.sound.transmissionClue, 5);
+  assert.equal(page.sound.musicTierFloor, 4);
+  page.until(() => page.run.transmission.phase === 'complete');
+  assert.deepEqual(page.events.filter(([name]) => name === 'request').map((request) => request[3]), [5, 4]);
+  const state = store.progress();
+  assert.equal(state.hasHeard('pattern'), true);
+  assert.equal(state.latestHeardId, 'beacon');
+  assert.equal(state.launchLevel, 4);
+  assert.equal(state.pendingClue, null);
+  assert.equal(page.starDiscovered, 4);
+  crashForThought(page);
+  assert.equal(readThought(page), 'How far to the beacon?');
+});
+
+test('a migrated gap exposes only heard replays and shows the original beacon caption in reduced motion', () => {
+  const store = storage();
+  store[CHECKPOINT] = JSON.stringify({ version: 2, meters: 90000, bolts: 12, discoveredClues: 4 });
+  const page = browser(undefined, store, { reduced: true });
+  page.click('mute');
+  page.click('start');
+  assert.equal(page.sound.musicTierFloor, 5);
+  crashForThought(page);
+  assert.equal(readThought(page), 'How far to the beacon?');
+  page.until(() => page.mode === 'ended');
+  assert.deepEqual(CLUES.map((_, index) => !page.elements[`replay-${index + 1}`].hidden),
+    [true, true, true, false, true, false, false, false, false]);
+  page.click('replay-4');
+  assert.equal(page.sound.transmissionClue, null);
+  page.click('replay-5');
+  page.until(() => page.sound.transmissionTime >= PULSE_LEAD);
+  assert.equal(page.sound.transmissionClue, 4);
+  assert.equal(page.starSignal.clueNumber, 5);
+  assert.equal(page.elements['sky-signal'].textContent, 'Still there. Looks like a beacon. We need to reach it');
+  assert.equal(page.document.body.dataset.signalInvert, 'false');
+  assert.equal(page.elements['replay-5'].attributes['aria-pressed'], 'true');
+  assert.equal(page.elements['replay-4'].hidden, true);
+});
+
+test('each new death thought pool works with only that recording heard and wraps after eight short lines', () => {
+  for (const [id, opening] of [
+    ['pattern', 'I started counting the pauses.'], ['purpose', 'Could it be meant to guide me?'],
+    ['warning', 'Could I leave it alone?'], ['doubt', 'What would I be warned about?'], ['reach', 'Could I find who sent it?'],
+  ]) {
+    const page = browser(undefined, heardCheckpoint(storage(), 0, [id]));
+    const lines = new Set();
+    for (let visit = 0; visit <= 8; visit++) {
+      page.click(visit ? 'restart' : 'start');
+      page.step();
+      crashForThought(page);
+      const line = readThought(page);
+      if (visit === 0 || visit === 8) assert.equal(line, opening);
+      if (visit < 8) {
+        assert.ok(line.length <= 33, line);
+        assert.equal(lines.has(line), false, line);
+        lines.add(line);
+      }
+      page.until(() => page.mode === 'ended');
+    }
+  }
 });
 
 test('an ordinary launch refreshes another tab’s capture before taking the profile snapshot', () => {
@@ -880,6 +1050,13 @@ test('a late capture interrupted by navigation stays pending, and a duplicate li
   assert.equal(store.progress().discoveredClues, 2);
   assert.equal(store.progress().pendingClue, 3);
 
+  const beforeRetry = browser(undefined, store);
+  beforeRetry.click('start');
+  beforeRetry.step();
+  crashForThought(beforeRetry);
+  assert.equal(readThought(beforeRetry), 'Who was asking?');
+  assert.equal(store.progress().pendingClue, 3);
+
   const first = browser(undefined, store);
   const second = browser(undefined, store);
   enterThirdCue(first);
@@ -889,12 +1066,12 @@ test('a late capture interrupted by navigation stays pending, and a duplicate li
     page.page('pagehide');
   }
   assert.equal(store.progress().discoveredClues, 3);
-  assert.equal(store.progress().pendingClue, 4);
-  const measured = 9000 + interrupted.run.distance + first.run.distance + second.run.distance;
+  assert.equal(store.progress().pendingClue, 5);
+  const measured = 9000 + interrupted.run.distance + beforeRetry.run.distance + first.run.distance + second.run.distance;
   assert.ok(Math.abs(store.progress().meters - measured) < 1e-8);
 });
 
-test('Relay Nine remains visible before any discovery, and reduced motion holds each clue’s distinct glow steady', () => {
+test('Relay Nine remains visible before discovery, and reduced motion holds each capped glow steady', () => {
   const read = (file) => readFileSync(join(__dirname, '..', file), 'utf8');
   const context = vm.createContext({ VoidRunner: require('../game.js'), VoidEpisode: require('../episode.js') });
   vm.runInContext(read('scene.js'), context);
@@ -913,18 +1090,22 @@ test('Relay Nine remains visible before any discovery, and reduced motion holds 
   relayNine(0, 0);
   assert.equal(fill, '#fff');
   assert.equal(radius, 11);
-  for (let ordinal = 1; ordinal <= CLUES.length; ordinal++) {
+  let previousStage = 0;
+  for (const [index, { presentationStage, radioAt }] of CLUES.entries()) {
     const previousRadius = radius;
-    relayNine(0, ordinal, { clueNumber: ordinal, elapsed: 0 });
-    assert.ok(radius > previousRadius);
+    relayNine(0, previousStage, { clueNumber: index + 1, elapsed: 0, presentationStage, radioAt });
+    if (presentationStage === previousStage) assert.equal(radius, previousRadius);
+    else assert.ok(radius > previousRadius);
     const initialRadius = radius;
-    relayNine(32, ordinal);
+    relayNine(32, presentationStage);
     assert.equal(radius, initialRadius);
+    previousStage = presentationStage;
   }
   scene.reduceMotion = false;
-  relayNine(0, 3, { clueNumber: 4, elapsed: 0 });
+  const beacon = { clueNumber: 5, elapsed: 0, presentationStage: 4, radioAt: PULSE_LEAD };
+  relayNine(0, 3, beacon);
   assert.equal(radius, 11);
-  relayNine(0, 3, { clueNumber: 4, elapsed: PULSE_LEAD });
+  relayNine(0, 3, { ...beacon, elapsed: PULSE_LEAD });
   assert.ok(radius > 11);
 });
 
@@ -982,7 +1163,7 @@ test('an interrupted merge is readable before cleanup and completes on a later l
   assert.equal(store.progress().meters, 506);
   assert.equal(store.progress().bankedBolts, 16);
   assert.equal(store.progress().discoveredClues, 1);
-  assert.equal(Object.keys(store).filter((key) => key.startsWith(ENTRY)).length, 1);
+  assert.equal(Object.keys(store).filter((key) => key.startsWith(HEARD_ENTRY)).length, 1);
 });
 
 test('failed writes keep exact unsaved distance and discovery in memory and retry once available', () => {
@@ -1155,7 +1336,7 @@ test('an interrupted compaction racing a new reset preserves the active story an
   writer.beginRun();
   const writeDuringMerge = store.progress();
   store.beforeWrite = (key) => {
-    if (key !== RESET_CHECKPOINT) return;
+    if (key !== HEARD_CHECKPOINT) return;
     delete store.beforeWrite;
     writeDuringMerge.reset();
     writeDuringMerge.beginRun();
@@ -1164,12 +1345,12 @@ test('an interrupted compaction racing a new reset preserves the active story an
   };
   const remove = store.removeItem;
   store.removeItem = (key) => {
-    if (key.startsWith(RESET_ENTRY)) throw new Error('interrupted checkpoint cleanup');
+    if (key.startsWith(HEARD_ENTRY)) throw new Error('interrupted checkpoint cleanup');
     remove.call(store, key);
   };
   for (let step = 1; step <= 16; step++) writer.credit(step, step);
   await databaseFactory.idle();
-  assert.equal(JSON.parse(store[RESET_CHECKPOINT]).merging.length, 16);
+  assert.equal(JSON.parse(store[HEARD_CHECKPOINT]).merging.length, 16);
   const check = () => {
     const state = store.progress();
     assert.equal(state.meters, CLUES[0].meters + 13);
@@ -1180,7 +1361,7 @@ test('an interrupted compaction racing a new reset preserves the active story an
   store.removeItem = remove;
   new EpisodeProgress({ storage: store, databaseFactory });
   await databaseFactory.idle();
-  assert.equal(JSON.parse(store[RESET_CHECKPOINT]).merging, undefined);
+  assert.equal(JSON.parse(store[HEARD_CHECKPOINT]).merging, undefined);
   check();
 });
 
@@ -1227,6 +1408,70 @@ test('previous thresholds are grandfathered using only the old subtotal, includi
   check(8900, 2, 9);
   modern.discover(2);
   check(8900, 2, 9, 2);
+});
+
+test('pre-upgrade counts stay capped at four and reset-scoped old deposits contribute exactly once', () => {
+  const store = storage();
+  const firstGeneration = 'reset:first';
+  store[LEGACY_ENTRY + 'invalid'] = JSON.stringify({ meters: 270000, discoveredClues: 5 });
+  store[ENTRY + 'invalid'] = JSON.stringify({ version: 2, meters: 270000, bolts: 100, discoveredClues: 5 });
+  assert.equal(store.progress().meters, 0);
+  assert.equal(store.progress().discoveredClues, 0);
+  store[RESET_KEY] = firstGeneration;
+  store[RESET_ENTRY + 'invalid'] = JSON.stringify({
+    version: 3, generation: firstGeneration, meters: 270000, bolts: 100, discoveredClues: 5,
+  });
+  store[RESET_CHECKPOINT] = JSON.stringify({
+    version: 3, generation: firstGeneration, meters: 89000.25, bolts: 12, discoveredClues: 3,
+  });
+  const active = store.progress();
+  active.credit(999.75, 2);
+  assert.equal(active.meters, 90000);
+  assert.equal(active.pendingClue, null);
+  assert.equal(active.bankedBolts, 14);
+  store[RESET_ENTRY + 'old-tab'] = JSON.stringify({
+    version: 3, generation: firstGeneration, meters: 999.75, bolts: 3, discoveredClues: 3,
+  });
+  active.refresh();
+  assert.equal(active.meters, 90999.75);
+  assert.equal(active.discoveredClues, 3);
+  assert.equal(active.pendingClue, 5);
+  active.discover(5);
+  active.save();
+  assert.equal(store.progress().meters, 90999.75);
+  assert.equal(store.progress().bankedBolts, 17);
+  assert.equal(store.progress().hasHeard('pattern'), false);
+  assert.equal(store.progress().hasHeard('beacon'), true);
+  active.reset();
+  store[RESET_ENTRY + 'stale-after-reset'] = JSON.stringify({
+    version: 3, generation: firstGeneration, meters: 340, bolts: 5, discoveredClues: 4,
+  });
+  const reopened = store.progress();
+  assert.equal(reopened.meters, 0);
+  assert.equal(reopened.discoveredClues, 0);
+  assert.equal(reopened.pendingClue, null);
+  assert.equal(reopened.bankedBolts, 22);
+});
+
+test('set union keeps different discoveries from two tabs through a failed save and retry', () => {
+  const store = heardCheckpoint(storage(), 270000);
+  const left = store.progress();
+  const right = store.progress();
+  const write = store.setItem;
+  store.setItem = () => { throw new Error('localStorage temporarily full'); };
+  left.discover(9);
+  left.credit(2.5, 3);
+  store.setItem = write;
+  right.credit(1.75, 4);
+  right.discover(1);
+  left.save();
+  left.save();
+  right.refresh();
+  assert.deepEqual([...right.heardIds].sort(), ['hiss', 'reach']);
+  assert.equal(right.latestHeardId, 'reach');
+  assert.equal(right.meters, 270004.25);
+  assert.equal(right.bankedBolts, 7);
+  assert.equal(right.pendingClue, 2);
 });
 
 test('cumulative bolt credits are integer deltas across duplicate updates, tabs, write rejection and retry', () => {
@@ -1303,7 +1548,7 @@ test('reset at results stops the active replay and clears the scene and launch p
   page.click('mute');
   page.click('start');
   page.until(() => page.mode === 'ended');
-  page.click('replay-4');
+  page.click('replay-5');
   page.until(() => page.sound.transmissionTime > PULSE_LEAD);
   assert.equal(page.document.body.dataset.signalInvert, 'true');
   assert.equal(page.elements['death-shade'].hidden, true);
@@ -1340,6 +1585,13 @@ test('reset at results stops the active replay and clears the scene and launch p
   assert.equal(page.sound.musicTierFloor, 1);
   assert.equal(page.run.transmission, null);
   assert.equal(page.elements['clue-reset-status'].textContent, '');
+  crashForThought(page);
+  assert.equal(readThought(page), 'One white dot.');
+  const reloaded = browser(undefined, store);
+  reloaded.click('start');
+  reloaded.step();
+  crashForThought(reloaded);
+  assert.equal(readThought(reloaded), 'One white dot.');
 });
 
 test('a peer reset cancels an active transmission and a suspended page cannot restore the old run', () => {
@@ -1508,8 +1760,8 @@ test('live clue bolt trails survive compaction, while practice and preview picku
   const { meters, bankedBolts, discoveredClues } = store.progress();
   assert.equal(bankedBolts, page.run.boltsCollected);
   assert.equal(discoveredClues, 4);
-  assert.ok(Object.keys(store).filter((key) => key.startsWith(ENTRY)).length < 16);
-  assert.ok(JSON.parse(store[CHECKPOINT]).bolts > 0);
+  assert.ok(Object.keys(store).filter((key) => key.startsWith(HEARD_ENTRY)).length < 16);
+  assert.ok(JSON.parse(store[HEARD_CHECKPOINT]).bolts > 0);
   for (const query of ['?preview=clue4', '?scenario=slide-gate', '?pace=fast']) {
     const practice = browser(query, store);
     practice.click('start');

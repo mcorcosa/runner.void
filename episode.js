@@ -9,15 +9,30 @@
   const RESET_JOURNAL = {
     checkpointKey: SAVE_KEY + ':v3:checkpoint', entryPrefix: SAVE_KEY + ':v3:entry:', version: 3, resetScoped: true,
   };
+  const HEARD_JOURNAL = {
+    checkpointKey: SAVE_KEY + ':v4:checkpoint', entryPrefix: SAVE_KEY + ':v4:entry:', version: 4, resetScoped: true,
+  };
   const COMPACT_BATCH = 16;
   const LEGACY_THRESHOLDS = [500, 2000, 5000, 9000];
+  const PREVIOUS_THRESHOLDS = [5000, 20000, 50000, 90000];
+  const LEGACY_IDS = ['hiss', 'question', 'sighting', 'beacon'];
   const PULSE_LEAD = 1.2;
   const CLUES = [
-    { meters: 5000, duration: 8, line: '' },
-    { meters: 20000, duration: 8, line: 'What is that?' },
-    { meters: 50000, duration: 10, line: 'Saw the light again' },
-    { meters: 90000, duration: 12, line: 'Still there. Looks like a beacon. We need to reach it' },
-  ];
+    { id: 'hiss', meters: 15000, duration: 8, line: '', presentationStage: 1, launchLevel: 1, audioKey: 1, radioAt: 0 },
+    { id: 'question', meters: 35000, duration: 8, line: 'What is that?', presentationStage: 2, launchLevel: 2, audioKey: 2 },
+    { id: 'sighting', meters: 65000, duration: 10, line: 'Saw the light again', presentationStage: 3, launchLevel: 3, audioKey: 3 },
+    { id: 'pattern', meters: 95000, duration: 9, line: 'Those pauses. Always the same.',
+      presentationStage: 3, launchLevel: 3, audioKey: 5 },
+    { id: 'beacon', meters: 125000, duration: 12, line: 'Still there. Looks like a beacon. We need to reach it',
+      presentationStage: 4, launchLevel: 4, audioKey: 4, invert: true },
+    { id: 'purpose', meters: 160000, duration: 9, line: 'What was it built to guide?', presentationStage: 4, launchLevel: 4, audioKey: 6 },
+    { id: 'warning', meters: 195000, duration: 10, line: 'Leave it alone.', followUp: 'Tell the others.',
+      presentationStage: 4, launchLevel: 4, audioKey: 7 },
+    { id: 'doubt', meters: 230000, duration: 9, line: 'What if it’s a warning?', presentationStage: 4, launchLevel: 4, audioKey: 8 },
+    { id: 'reach', meters: 270000, duration: 11, line: 'We MUST reach it.', followUp: 'Find out who sent this.',
+      presentationStage: 4, launchLevel: 4, audioKey: 9 },
+  ].map((clue) => ({ radioAt: PULSE_LEAD, invert: false, ...clue }));
+  const CLUE_IDS = new Set(CLUES.map(({ id }) => id));
 
   function parse(serialized) {
     try {
@@ -28,8 +43,8 @@
     }
   }
 
-  function validDiscovery(count) {
-    return Number.isInteger(count) && count >= 0 && count <= CLUES.length;
+  function validLegacyDiscovery(count) {
+    return Number.isInteger(count) && count >= 0 && count <= LEGACY_IDS.length;
   }
 
   function validBoltCount(count) {
@@ -42,7 +57,10 @@
 
   function parseEntry(serialized, journal) {
     const state = parse(serialized);
-    if (!state || state.version !== journal.version || !validDiscovery(state.discoveredClues)) return null;
+    if (!state || state.version !== journal.version) return null;
+    if (journal === HEARD_JOURNAL) {
+      if (!Array.isArray(state.heard) || !state.heard.every((id) => CLUE_IDS.has(id))) return null;
+    } else if (!validLegacyDiscovery(state.discoveredClues)) return null;
     if (journal.version) state.bolts = validBoltCount(state.bolts) ? state.bolts : 0;
     return state;
   }
@@ -58,10 +76,11 @@
   }
 
   function checkpointForGeneration(journal, checkpoint, generation) {
-    const total = checkpoint ?? { meters: 0, discoveredClues: 0 };
+    const discovery = journal === HEARD_JOURNAL ? { heard: [] } : { discoveredClues: 0 };
+    const total = checkpoint ?? { meters: 0, ...discovery };
     if (journal.version && !checkpoint) Object.assign(total, { version: journal.version, bolts: 0 });
     if (journal.resetScoped && generation !== total.generation) {
-      Object.assign(total, { generation, meters: 0, discoveredClues: 0 });
+      Object.assign(total, { generation, meters: 0, ...discovery });
     }
     return total;
   }
@@ -71,7 +90,8 @@
     // A reset retires the story fields of older generations. Every generation contributes to the bank.
     if (!journal.resetScoped || total.generation === entry.generation) {
       total.meters += entry.meters;
-      total.discoveredClues = Math.max(total.discoveredClues, entry.discoveredClues);
+      if (journal === HEARD_JOURNAL) total.heard = [...new Set([...total.heard, ...entry.heard])];
+      else total.discoveredClues = Math.max(total.discoveredClues, entry.discoveredClues);
     }
     if (journal.version) total.bolts = addBolts(total.bolts, entry.bolts);
   }
@@ -116,14 +136,14 @@
       this.storedMeters = 0;
       this.storedBolts = 0;
       this.legacyPending = 0;
-      this.discoveredClues = 0;
+      this.heardIds = new Set();
       this.priorRunsDistance = 0;
       this.creditedDistance = 0;
       this.savedDistance = 0;
       this.priorRunsBolts = 0;
       this.creditedBolts = 0;
       this.savedBolts = 0;
-      this.unsavedDiscovery = 0;
+      this.unsavedHeard = new Set();
       this.refresh();
       this.runInvalidated = false;
     }
@@ -147,8 +167,8 @@
       this.runInvalidated = true;
       this.storedMeters = 0;
       this.legacyPending = 0;
-      this.discoveredClues = 0;
-      this.unsavedDiscovery = 0;
+      this.heardIds.clear();
+      this.unsavedHeard.clear();
       this.priorRunsDistance = 0;
       this.creditedDistance = 0;
       this.savedDistance = 0;
@@ -198,27 +218,34 @@
           const legacySaved = this.generation === null ? this.storage.getItem(LEGACY_JOURNAL.checkpointKey) : null;
           const saved = this.storage.getItem(JOURNAL.checkpointKey);
           const resetSaved = this.storage.getItem(RESET_JOURNAL.checkpointKey);
+          const heardSaved = this.storage.getItem(HEARD_JOURNAL.checkpointKey);
           const keys = Object.keys(this.storage);
           const previous = this.generation === null ? this.readJournal(LEGACY_JOURNAL, legacySaved, keys) : null;
           const current = this.readJournal(JOURNAL, saved, keys);
           const reset = this.readJournal(RESET_JOURNAL, resetSaved, keys, this.generation);
+          const heard = this.readJournal(HEARD_JOURNAL, heardSaved, keys, this.generation);
           // A merge may have moved an entry into the checkpoint while this tab was reading it.
           if (this.syncReset() || (previous && legacySaved !== this.storage.getItem(LEGACY_JOURNAL.checkpointKey)) ||
               saved !== this.storage.getItem(JOURNAL.checkpointKey) ||
-              resetSaved !== this.storage.getItem(RESET_JOURNAL.checkpointKey)) continue;
-          this.storedBolts = addBolts(current.total.bolts, reset.total.bolts);
+              resetSaved !== this.storage.getItem(RESET_JOURNAL.checkpointKey) ||
+              heardSaved !== this.storage.getItem(HEARD_JOURNAL.checkpointKey)) continue;
+          this.storedBolts = addBolts(addBolts(current.total.bolts, reset.total.bolts), heard.total.bolts);
+          let legacyDistance = reset.total.meters;
+          let legacyDiscovered = reset.total.discoveredClues;
+          let legacyPending = 0;
           if (previous) {
             const previousMeters = legacyMeters + previous.total.meters;
             const legacyEntitlement = legacyStatus === 'pending' || legacyStatus === 'discovered' ? 1 : 0;
-            this.legacyPending = Math.max(legacyEntitlement, LEGACY_THRESHOLDS.filter((limit) => previousMeters >= limit).length);
-            this.storedMeters = previousMeters + current.total.meters;
-            this.discoveredClues = Math.max(this.discoveredClues, legacyStatus === 'discovered' ? 1 : 0,
+            legacyPending = Math.max(legacyEntitlement, LEGACY_THRESHOLDS.filter((limit) => previousMeters >= limit).length);
+            legacyDistance += previousMeters + current.total.meters;
+            legacyDiscovered = Math.max(legacyDiscovered, legacyStatus === 'discovered' ? 1 : 0,
               previous.total.discoveredClues, current.total.discoveredClues);
-          } else {
-            this.storedMeters = reset.total.meters;
-            this.discoveredClues = Math.max(this.discoveredClues, reset.total.discoveredClues);
           }
-          if (previous?.needsCompaction || current.needsCompaction || reset.needsCompaction) this.requestCompaction();
+          this.legacyPending = Math.max(legacyPending, PREVIOUS_THRESHOLDS.filter((limit) => legacyDistance >= limit).length);
+          this.storedMeters = legacyDistance + heard.total.meters;
+          for (const id of LEGACY_IDS.slice(0, legacyDiscovered)) this.heardIds.add(id);
+          for (const id of heard.total.heard) this.heardIds.add(id);
+          if ([previous, current, reset, heard].some((result) => result?.needsCompaction)) this.requestCompaction();
           return;
         }
       } catch {
@@ -235,7 +262,8 @@
         const legacyMore = this.generation === null && this.compact(LEGACY_JOURNAL);
         const currentMore = this.compact(JOURNAL);
         const resetMore = this.compact(RESET_JOURNAL);
-        more = legacyMore || currentMore || resetMore;
+        const heardMore = this.compact(HEARD_JOURNAL);
+        more = legacyMore || currentMore || resetMore || heardMore;
       }).catch(() => {
         // A pending merge can be finished at the next checkpoint.
       }).finally(() => {
@@ -271,14 +299,40 @@
       return this.storedMeters + (this.priorRunsDistance + this.creditedDistance - this.savedDistance);
     }
 
+    // Discovery and eligibility are counts. Only pendingClue is a display ordinal.
+    get discoveredClues() {
+      return this.heardIds.size;
+    }
+
+    hasHeard(id) {
+      return this.heardIds.has(id);
+    }
+
+    get launchLevel() {
+      return Math.max(0, ...CLUES.filter(({ id }) => this.hasHeard(id)).map(({ launchLevel }) => launchLevel));
+    }
+
+    get presentationStage() {
+      return Math.max(0, ...CLUES.filter(({ id }) => this.hasHeard(id)).map(({ presentationStage }) => presentationStage));
+    }
+
+    get latestHeardId() {
+      return CLUES.findLast(({ id }) => this.hasHeard(id))?.id;
+    }
+
+    isEligible(clue, meters) {
+      const legacyIndex = LEGACY_IDS.indexOf(clue.id);
+      return meters >= clue.meters || (legacyIndex >= 0 && legacyIndex < this.legacyPending);
+    }
+
     get eligibleClues() {
       const meters = this.meters;
-      const next = CLUES.findIndex((clue) => meters < clue.meters);
-      return Math.max(this.discoveredClues, this.legacyPending, next < 0 ? CLUES.length : next);
+      return CLUES.filter((clue) => this.hasHeard(clue.id) || this.isEligible(clue, meters)).length;
     }
 
     get pendingClue() {
-      return this.discoveredClues < this.eligibleClues ? this.discoveredClues + 1 : null;
+      const meters = this.meters;
+      return CLUES.findIndex((clue) => !this.hasHeard(clue.id) && this.isEligible(clue, meters)) + 1 || null;
     }
 
     get bankedBolts() {
@@ -291,7 +345,7 @@
 
     get hasUnsaved() {
       return this.unsavedBolts > 0 || (!this.sessionOnlyReset &&
-        (Boolean(this.unsavedDiscovery) || this.priorRunsDistance + this.creditedDistance > this.savedDistance));
+        (this.unsavedHeard.size > 0 || this.priorRunsDistance + this.creditedDistance > this.savedDistance));
     }
 
     beginRun() {
@@ -305,7 +359,8 @@
 
     credit(distance, bolts = 0) {
       if (this.runInvalidated) return;
-      const nextThreshold = CLUES[this.eligibleClues]?.meters ?? Infinity;
+      const meters = this.meters;
+      const nextThreshold = CLUES.find((clue) => !this.hasHeard(clue.id) && !this.isEligible(clue, meters))?.meters ?? Infinity;
       if (Number.isFinite(distance) && distance > this.creditedDistance) this.creditedDistance = distance;
       const pickedUp = validBoltCount(bolts) && bolts > this.creditedBolts;
       if (pickedUp) this.creditedBolts = bolts;
@@ -313,10 +368,12 @@
     }
 
     discover(clueNumber) {
-      if (this.syncReset() || this.runInvalidated) return;
-      if (clueNumber === null || clueNumber !== this.pendingClue) return;
-      this.discoveredClues = clueNumber;
-      this.unsavedDiscovery = clueNumber;
+      if (this.syncReset() || this.runInvalidated || !Number.isInteger(clueNumber)) return;
+      const clue = CLUES[clueNumber - 1];
+      // The eligible cue that finished may differ from the next cue if progress arrived mid-playback.
+      if (!clue || this.hasHeard(clue.id) || !this.isEligible(clue, this.meters)) return;
+      this.heardIds.add(clue.id);
+      this.unsavedHeard.add(clue.id);
       this.save();
     }
 
@@ -326,17 +383,16 @@
       const distance = this.priorRunsDistance + this.creditedDistance;
       const meters = this.sessionOnlyReset ? 0 : distance - this.savedDistance;
       const bolts = this.unsavedBolts;
-      const discoveredClues = this.sessionOnlyReset ? 0 : this.unsavedDiscovery;
-      if (meters > 0 || bolts > 0 || discoveredClues) {
-        const journal = this.generation === null ? JOURNAL : RESET_JOURNAL;
+      const heard = this.sessionOnlyReset ? [] : [...this.unsavedHeard];
+      if (meters > 0 || bolts > 0 || heard.length > 0) {
+        const journal = HEARD_JOURNAL;
         const key = journal.entryPrefix + this.pageId + ':' + ++this.entryNumber;
-        const entry = { version: journal.version, meters, bolts, discoveredClues };
-        if (journal.resetScoped) entry.generation = this.generation;
+        const entry = { version: journal.version, generation: this.generation, meters, bolts, heard };
         try {
           this.storage.setItem(key, JSON.stringify(entry));
           if (!this.sessionOnlyReset) {
             this.savedDistance = distance;
-            this.unsavedDiscovery = 0;
+            this.unsavedHeard.clear();
           }
           this.savedBolts += bolts;
           this.storedMeters += meters;

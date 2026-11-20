@@ -154,7 +154,9 @@ test('distant runway paint joins the ordinary deck and respects the same gap geo
     assert.equal(cues.length, 3);
     assert.ok(cues.every(([, entry]) => entry < range));
     assert.ok(walls.every(([, , far]) => far <= seam));
-    assert.deepEqual(hurdles.map(([, z]) => z), [world(.84) - run.distance]);
+    assert.deepEqual(hurdles.filter(([, , detail]) => detail > 0).map(([, z]) => z), [world(.84) - run.distance]);
+    assert.deepEqual(hurdles.filter(([, , detail]) => detail === 0).map(([, z]) => z),
+      [world(1.2) - run.distance, world(.96) - run.distance]);
 
     const distantFlats = flats.filter(([, , , far]) => far > seam);
     assert.ok(distantFlats.length <= 40);
@@ -163,6 +165,42 @@ test('distant runway paint joins the ordinary deck and respects the same gap geo
     assert.ok(deckY(farthest) - horizon < (deckY(range) - horizon) * .08);
     assert.equal(scene.horizon, horizon);
   }
+});
+
+test('the same generated runway gap cuts the deck before it receives a detailed warning', () => {
+  const { scene, run } = fixture({ scenario: '' });
+  const gap = run.forecastObstacles.find((item) => item.type === 'gap');
+  assert.ok(gap.z > run.viewDistance && gap.end <= 16 * run.viewDistance);
+  const flats = [];
+  const warnings = [];
+  const lines = [];
+  const deck = scene.deckSection.bind(scene);
+  let runwayPaint;
+  scene.flat = (...args) => flats.push(args);
+  scene.line = (...args) => lines.push(args);
+  scene.gapWarning = (...args) => warnings.push(args);
+  scene.deckSection = (near, far, selected, mask, detailEnd, paint) => {
+    if (far > scene.viewDistance) runwayPaint = paint.deck;
+    deck(near, far, selected, mask, detailEnd, paint);
+  };
+  const sample = (x, z, fill) => flats.some(([left, right, near, far, color]) =>
+    color === fill && left < x && x < right && near < z && z < far);
+  const x = laneX(gap.lane);
+  const middle = (gap.z + gap.end) / 2;
+  scene.track(run, false);
+  scene.drawCourseObjects(run, 0, false, false, false);
+  assert.equal(warnings.length, 0);
+  assert.ok(!sample(x, middle, runwayPaint));
+  assert.ok(sample(laneX(gap.lane + 1), middle, runwayPaint));
+  assert.ok(lines.some(([points, color]) => color === '#71629a' && points[0][2] === gap.z));
+
+  run.distance = gap.z - scene.viewDistance * 0.35;
+  run.populate();
+  assert.ok(run.obstacles.includes(gap));
+  flats.length = 0;
+  scene.track(run, false);
+  assert.ok(warnings.some(([lane, start]) => lane === x && start === gap.z - run.distance));
+  assert.ok(!sample(x, gap.z - run.distance + 1, '#261b38'));
 });
 
 test('the authored platform has a landable top and the gate leaves standing-to-slide clearance visible', () => {
@@ -211,6 +249,49 @@ test('both ends of a long span occlude point objects and the player in depth ord
     ['gate', 20, 28], ['platform', 0, 20], ['player'], ['platform', -5, 0], ['bolt', 4, -5],
     ['platform', -scene.rearViewDistance, -5],
   ]);
+});
+
+test('a runway platform is sliced behind and in front of a point obstacle at its depth', () => {
+  const { scene, run } = fixture();
+  const calls = [];
+  const range = scene.viewDistance;
+  run.obstacles = [
+    { type: 'platform', z: range, end: range * 1.21, lane: 2 },
+    { type: 'barrier', z: range * 1.1, lane: 2 },
+  ];
+  scene.platform = (_, distance, near, far) => calls.push([near, far]);
+  scene.barrier = (_, z) => calls.push([z]);
+  scene.drawCourseObjects(run, 0, false, false, false);
+  assert.deepEqual(calls, [[range * 1.1, range * 1.21], [range * 1.1], [range, range * 1.1]]);
+});
+
+test('solid hazard polygons use opaque paint on both sides of the detail handoff', () => {
+  const { scene, run } = fixture();
+  const fills = [];
+  const decals = new Set(['#130b20b5', '#6671a6', '#adcdf6', '#b3ebff']);
+  const face = scene.face.bind(scene);
+  let record = true;
+  scene.face = (points, color) => {
+    record = !decals.has(color);
+    face(points, color);
+  };
+  scene.ctx.fill = () => {
+    if (record) fills.push([scene.ctx.fillStyle, scene.ctx.globalAlpha]);
+  };
+  scene.player = () => {};
+  for (const type of ['hurdle', 'barrier', 'movingBarrier', 'platform', 'slideGate', 'spikes']) {
+    for (const fraction of [0.84, 0.91, 2]) {
+      const z = scene.viewDistance * fraction;
+      run.obstacles = [{ type, z, lane: 2, toLane: 3, end: z + 14, tileLength: 14, tiles: 1, lanes: 1 }];
+      fills.length = 0;
+      scene.drawCourseObjects(run, 0, false, false, false);
+      assert.ok(fills.length > 0, type);
+      for (const [color, alpha] of fills) {
+        assert.match(color, /^#[0-9a-f]{6}$/i, type);
+        assert.equal(alpha, 1, type);
+      }
+    }
+  }
 });
 
 test('grounded sliding renders at platform height and the moving barrier uses physics time', () => {
@@ -288,6 +369,23 @@ test('pull chevrons mirror and the lightning glyph projects from the bolt height
   assert.ok(polygon[1][0] < polygon[2][0] && polygon[4][0] > polygon[5][0]);
 });
 
+test('the scene samples a moving bolt at the pickup sweep time in both motion modes', () => {
+  const { scene, run, operations } = fixture();
+  const bolt = { lane: 3, z: 20, height: 1.84, motionPhase: 0.7 };
+  run.bolts = [bolt];
+  run.boltTime = 0.27;
+  run.time = 0.3;
+  scene.player = () => {};
+  for (const reduced of [false, true]) {
+    operations.length = 0;
+    run.reducedMotion = reduced;
+    scene.drawCourseObjects(run, 12, false, false, false);
+    const gradient = operations.find(([name]) => name === 'gradient');
+    const { x, y } = runner.boltPositionAt(bolt, run.boltTime, reduced);
+    assert.deepEqual(gradient.slice(1, 3), Array.from(scene.screenPoint(scene.viewPoint([x, y, bolt.z]))));
+  }
+});
+
 test('the dark backdrop moves at running pace while reduced motion holds the sky steady', () => {
   for (const reduceMotion of [false, true]) {
     const { scene, run, operations } = fixture({ reduceMotion });
@@ -303,6 +401,37 @@ test('the dark backdrop moves at running pace while reduced motion holds the sky
     assert.ok(first.some(([kind, offset, color]) => kind === 'stop' && offset === 0 && color === '#020209'));
     if (reduceMotion) assert.deepEqual(first, second);
     else assert.notDeepEqual(first, second);
+  }
+});
+
+test('Relay Nine light uses a bounded presentation stage for idle, live, and replay frames', () => {
+  for (const reduceMotion of [false, true]) {
+    const { scene, run, operations } = fixture({ reduceMotion });
+    scene.track = scene.deepVoid = scene.drawCourseObjects = () => {};
+    scene.drawPace = scene.drawBoost = () => {};
+    const glow = (stage, signal, mode = 'running') => {
+      operations.length = 0;
+      scene.draw(run, 0, 1 / 60, mode, stage, signal);
+      return operations.findLast(([kind]) => kind === 'gradient').at(-1);
+    };
+
+    assert.equal(glow(-2), glow(0));
+    assert.equal(glow(9), glow(4));
+    assert.ok(glow(4) > glow(3));
+    const live = { clueNumber: 9, presentationStage: 3, elapsed: 0.6, radioAt: 1.2 };
+    const active = glow(4, live);
+    assert.equal(glow(0, live, 'ended'), active);
+    assert.equal(glow(4, { ...live, clueNumber: 1 }), active);
+    assert.ok(glow(4, { ...live, presentationStage: 4 }) > active);
+    assert.equal(glow(0, { ...live, presentationStage: 9 }), glow(0, { ...live, presentationStage: 4 }));
+    assert.equal(glow(0, { clueNumber: 9, elapsed: live.elapsed }), glow(0, { ...live, presentationStage: 4 }));
+
+    const leadIn = { ...live, elapsed: 0 };
+    assert.equal(glow(3, leadIn), reduceMotion ? active : glow(0));
+    assert.equal(glow(0, { ...leadIn, radioAt: 0 }), glow(3));
+    const full = glow(3, { ...live, elapsed: live.radioAt });
+    if (reduceMotion) assert.equal(full, active);
+    else assert.ok(full > active && active > glow(0));
   }
 });
 
@@ -323,8 +452,12 @@ test('very long structures draw within the view window with bounded cost at 572 
     scene.face = () => { faces++; };
     scene.drawCourseObjects(run, 1, false, false);
     assert.ok(faces > 0 && faces < 100);
-    assert.equal(slabs.length, 4);
+    const seam = scene.viewDistance * 0.9;
+    const detail = slabs.filter(([, , , , , far]) => far <= seam);
+    const runway = slabs.filter(([, , , , near]) => near === seam);
+    assert.equal(detail.length, 4);
+    assert.equal(runway.length, 2);
     assert.ok(slabs.every(([, , , , near, far, cap]) =>
-      near >= -scene.rearViewDistance && far <= scene.viewDistance * 0.9 && cap === false));
+      near >= -scene.rearViewDistance && far <= scene.viewDistance * 16 && cap === false));
   }
 });

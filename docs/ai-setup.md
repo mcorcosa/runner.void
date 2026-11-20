@@ -2,11 +2,19 @@
 
 Use this guide to start a project with separate chats for ownership, management, implementation, and documentation. Give each chat a role, the project context it needs, and a clear reporting destination.
 
+## Model policy
+
+Use Sol for all run.void project chats.
+
+- **High** for the PM, area managers, the shared Project Librarian, and complex or important work.
+- **Medium** for bounded work.
+- **Low** for straightforward work that needs light reasoning.
+
 ## Roles and decision authority
 
 - **Owner** directs the project, sets priorities and constraints, and resolves decisions the project manager escalates.
-- **Project manager (PM)** plans the work, makes decisions within the owner's direction, tracks progress and dependencies, and reports to the owner. The PM opens area manager chats on **Astra High** as needed and routes implementation through an area manager.
-- **Area managers (Astra High)** plan and assign work in their areas, independently verify it for acceptance, and report to both the PM and the owner. Escalate cross-area dependencies and decisions that exceed the assignment to the PM.
+- **Project manager (PM)** plans the work, makes decisions within the owner's direction, tracks progress and dependencies, and reports to the owner. The PM opens area manager chats as needed and routes implementation through an area manager.
+- **Area managers** plan and assign work in their areas, independently verify it for acceptance, and report to both the PM and the owner. Escalate cross-area dependencies and decisions that exceed the assignment to the PM.
 - **Implementers** in separate Sol chats own changes to implementation code, tests (including new QA code), assets, configuration, and fixes. They verify the result and report back to the assigning manager with evidence and any remaining issues.
 - **Librarian (Sol High)** verifies and maintains human-readable project documentation for agents and people.
 
@@ -14,7 +22,7 @@ The PM and area managers own coordination and independent acceptance. They may i
 
 ## Delegation and reporting
 
-1. For each distinct implementation assignment, the area manager creates a fresh, named, user-visible project chat. Use **Sol High** for complex or important work and **Sol Medium** for bounded work. Revisions to the same assignment may stay with its named Sol owner.
+1. For each distinct implementation assignment, the area manager creates a fresh, named, user-visible Sol project chat and selects effort using the [model policy](#model-policy). Revisions to the same assignment may stay with its named Sol owner.
 2. Before any implementation changes, give the implementer a written handoff in the named chat. Record the actual implementer chat ID or link, exact model and reasoning effort, expected outcome, scope, owned paths, constraints, acceptance criteria and checks, and reporting destination. Identify the workspace or branch when it matters. Assign clear ownership before starting parallel work that could touch the same files. If the required Sol chat is missing or delegation is unavailable, hold implementation and escalate the blocker to the PM. The PM escalates unresolved blockers to the owner.
 3. The implementer reports changed files, what they verified, the evidence, and any blocker or decision needed. The assigning manager independently verifies the result against the acceptance criteria, names the Sol chat that did the work, and reports the acceptance outcome and evidence to the PM and owner. Managers relay decisions, dependencies, and issues that need action. Send review findings that require implementation and fixes of any size back to Sol.
 4. Route documentation assignments through the [shared Project Librarian](#shared-project-librarian).

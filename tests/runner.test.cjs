@@ -579,19 +579,32 @@ test('a default transmission rejects repeats and advances only on playback ticks
   assert.deepEqual(brief.transmission, { phase: 'complete', elapsed: STEP / 2, duration: STEP / 2 });
 });
 
-test('a fresh run can take a later clue and rejects invalid, active, or out-of-order requests', () => {
-  const run = new Run({ scenario: 'landing' });
-  for (const clue of [0, -1, 5, 3.5, NaN, '3', null]) {
+test('the default of four transmissions can be expanded without changing the launch profile', () => {
+  const standard = new Run({ seed: 187 });
+  assert.equal(standard.requestTransmission(STEP, 5), false);
+  assert.equal(standard.requestTransmission(STEP, 4), true);
+  const expanded = new Run({ seed: 187, transmissionCount: 9 });
+  assert.equal(expanded.speed, ENDLESS_START_SPEED);
+  assert.equal(expanded.musicTierFloor, 1);
+  assert.equal(expanded.requestTransmission(STEP, 9), true);
+  for (const transmissionCount of [0, -1, 1.5, Infinity, NaN, '9', null, Number.MAX_SAFE_INTEGER + 1]) {
+    assert.throws(() => new Run({ transmissionCount }), RangeError);
+  }
+});
+
+test('a run accepts distinct clues out of order and rejects invalid, active, or repeated requests', () => {
+  const run = new Run({ scenario: 'landing', transmissionCount: 9 });
+  for (const clue of [0, -1, 10, 3.5, NaN, '3', null]) {
     assert.equal(run.requestTransmission(STEP, clue), false);
     assert.equal(run.transmission, null);
   }
-  assert.equal(run.requestTransmission(STEP, 3), true);
+  assert.equal(run.requestTransmission(STEP, 5), true);
   assert.equal(run.requestTransmission(STEP, 4), false);
   run.tick();
   assert.equal(run.requestTransmission(STEP, 4), false);
   run.tick();
   assert.deepEqual(run.transmission, { phase: 'complete', elapsed: STEP, duration: STEP });
-  for (const clue of [1, 2, 3]) assert.equal(run.requestTransmission(STEP, clue), false);
+  assert.equal(run.requestTransmission(STEP, 5), false);
   assert.equal(run.requestTransmission(3 * STEP, 4), true);
   run.tick();
   run.tick();
@@ -600,6 +613,8 @@ test('a fresh run can take a later clue and rejects invalid, active, or out-of-o
   run.tick();
   assert.deepEqual(run.transmission, { phase: 'complete', elapsed: 3 * STEP, duration: 3 * STEP });
   assert.equal(run.requestTransmission(STEP, 4), false);
+  assert.equal(run.requestTransmission(STEP, 5), false);
+  assert.equal(run.requestTransmission(STEP, 9), true);
 });
 
 test('playback waits for the runner rear to clear the end of each queued hazard', () => {
@@ -775,16 +790,18 @@ test('a staged introduction resumes with full warning and a one-move route from 
   }
 });
 
-test('all four clues can drain and resume the same boosted endless run with full warning each time', (t) => {
+test('all nine clues drain and resume the same boosted endless run with full warning each time', (t) => {
   t.mock.method(encounters, 'placeEncounter', () => false);
-  const run = new Run({ seed: 187, discoveredClues: 4 });
+  assert.equal(CLUES.length, 9);
+  const run = new Run({ seed: 187, launchLevel: 4, transmissionCount: CLUES.length });
   run.baseSpeed = run.speed = 572;
   run.distance = 90_000;
   run.obstacles.length = 0;
   run.addSpikes(run.distance + 600, 3, 2, 2);
-  for (const clue of [1, 2, 3, 4]) {
-    const duration = 4.5;
+  for (const [index, { duration }] of CLUES.entries()) {
+    const clue = index + 1;
     const nextId = run.id;
+    const discarded = run.forecastObstacles.slice();
     const clearance = Math.max(...run.obstacles.map(({ z, end = z, type }) =>
       end + (type === 'gap' || type === 'spikes' ? 0.36 : type === 'barrier' ? 0.68 : 0.61)));
     const blocked = new Set(run.obstacles.filter(({ z }) => z > run.distance)
@@ -793,11 +810,13 @@ test('all four clues can drain and resume the same boosted endless run with full
     assert.ok(safe !== undefined);
     run.move(safe - run.lane);
     assert.equal(run.requestTransmission(duration, clue), true);
+    assert.equal(run.forecastObstacles.length, 0);
     until(run, () => run.transmission.phase === 'playing');
     assert.ok(run.distance > clearance);
     assert.equal(run.id, nextId);
     assert.equal(run.transmission.elapsed, 0);
 
+    until(run, () => run.transmission.elapsed >= duration / 2);
     until(run, () => run.transmission.elapsed >= duration - 1);
     run.jump();
     until(run, () => run.slideWindowOpen);
@@ -808,11 +827,14 @@ test('all four clues can drain and resume the same boosted endless run with full
     run.dash();
     run.tick();
     assert.equal(run.transmission.phase, 'complete');
+    assert.equal(run.transmission.elapsed, duration);
     assert.ok(run.speed - run.baseSpeed > MAX_EXTRA_SPEED - 0.2);
     const first = run.obstacles.find(({ id }) => id >= nextId);
     const warning = (run.baseSpeed + MAX_EXTRA_SPEED) * VIEW_SECONDS + 0.9 * VIEW_SECONDS ** 2;
     assert.ok(first.z - run.distance - 0.68 >= warning);
     assert.ok(run.obstacles.every(({ id, z }) => id < nextId || z === first.z));
+    assert.ok(run.forecastObstacles.length > 0);
+    assert.ok(run.forecastObstacles.every((obstacle) => obstacle.z > first.z && !discarded.includes(obstacle)));
     assert.equal(run.requestTransmission(duration, clue), false);
   }
 });
@@ -971,10 +993,16 @@ test('the standard advanced opening mixes three-lane rows and schedules spikes a
 
 const launchSpeeds = [48, 80, 112, 144, 176];
 
-test('completed clues set the next endless run pace and music from zero real meters', () => {
-  for (const [discoveredClues, launchSpeed] of launchSpeeds.entries()) {
-    const run = new Run({ seed: 187, discoveredClues, pace: 'fast' });
-    assert.equal(run.musicTierFloor, discoveredClues + 1);
+test('explicit launch levels preserve the existing endless openings, pace, and music tier', () => {
+  for (const [launchLevel, launchSpeed] of launchSpeeds.entries()) {
+    const run = new Run({ seed: 187, launchLevel, discoveredClues: 9, transmissionCount: 9, pace: 'fast' });
+    const legacy = new Run({ seed: 187, discoveredClues: launchLevel });
+    assert.deepEqual(run.obstacles, legacy.obstacles);
+    assert.deepEqual(run.forecastObstacles, legacy.forecastObstacles);
+    assert.deepEqual(run.advancedOpening, legacy.advancedOpening);
+    assert.equal(run.nextClosure, legacy.nextClosure);
+    assert.equal(run.courseTierFloor, launchLevel + 1);
+    assert.equal(run.musicTierFloor, launchLevel + 1);
     assert.equal(run.distance, 0);
     assert.equal(run.time, 0);
     assert.equal(run.speed, launchSpeed);
@@ -983,6 +1011,9 @@ test('completed clues set the next endless run pace and music from zero real met
     run.tick();
     assert.equal(run.distance, (launchSpeed + 1.8 * STEP) * STEP);
     assert.equal(run.speed, launchSpeed + 1.8 * STEP);
+  }
+  for (const launchLevel of [-1, 5, 2.8, Infinity, NaN, '4', null]) {
+    assert.throws(() => new Run({ launchLevel }), RangeError);
   }
   for (const [count, bounded] of [[-1, 0], [Infinity, 0], [NaN, 0], ['4', 0], [null, 0], [2.8, 2], [99, 4]]) {
     const run = new Run({ discoveredClues: count });
@@ -1001,11 +1032,12 @@ test('scripted scenarios retain their pace and layouts at every clue count', () 
   for (const scenario of ['landing', 'spike-long', 'high-speed']) {
     for (const pace of ['', 'fast']) {
       const baseline = new Run({ scenario, pace });
-      const progressed = new Run({ scenario, pace, advanced: true, discoveredClues: 4 });
+      const progressed = new Run({ scenario, pace, advanced: true, discoveredClues: 4, launchLevel: 4, transmissionCount: 9 });
       assert.equal(progressed.musicTierFloor, 1);
       assert.equal(progressed.advanced, false);
       assert.equal(progressed.speed, baseline.speed);
       assert.deepEqual(progressed.obstacles, baseline.obstacles);
+      assert.equal(progressed.forecastObstacles.length, 0);
     }
   }
 });
@@ -1141,13 +1173,55 @@ test('a normal jump clears a generated short gap after a standard closure', (t) 
     until(run, () => run.distance >= distance);
     run.move(direction);
   }
-  until(run, () => run.distance >= 1795);
+  until(run, () => run.obstacles.some((obstacle) => obstacle.short));
   const short = run.obstacles.find((obstacle) => obstacle.short);
+  until(run, () => short.z - run.distance <= run.speed * 0.22);
   assert.ok(short && short.lane === run.lane && run.distance < short.z);
   run.jump();
   until(run, () => !run.airborne);
   assert.equal(run.crash, null);
   assert.ok(landing > short.end);
+});
+
+test('a forecast obstacle becomes the same swept collider, and discarded forecasts cannot return', () => {
+  class WideView extends Run {
+    get viewDistance() { return 2500; }
+  }
+  const run = new Run({ seed: 187 });
+  const forecast = run.forecastObstacles.slice();
+  const precalculated = new WideView({ seed: 187 }).obstacles;
+  assert.deepEqual([...run.obstacles, ...forecast].slice(0, precalculated.length), precalculated);
+  const hurdle = forecast.find(({ type }) => type === 'hurdle');
+  const gap = forecast.find(({ type }) => type === 'gap');
+  assert.ok(hurdle.z > run.viewDistance);
+  assert.ok(gap.z < run.viewDistance * 16);
+  assert.ok(!run.obstacles.includes(hurdle));
+  assert.ok(!run.obstacles.includes(gap));
+  run.populate();
+  assert.deepEqual(run.forecastObstacles, forecast);
+
+  run.distance = hurdle.z - run.viewDistance * 0.5;
+  run.populate();
+  assert.equal(run.obstacles.find(({ id }) => id === hurdle.id), hurdle);
+  assert.ok(!run.forecastObstacles.includes(hurdle));
+  run.distance = hurdle.z - 1;
+  run.lane = hurdle.lane;
+  run.x = laneX(hurdle.lane);
+  run.tick();
+  assert.equal(run.crash, hurdle);
+
+  const clear = new Run({ seed: 187 });
+  const discarded = new Set(clear.forecastObstacles.map(({ id }) => id));
+  clear.obstacles.length = 0;
+  assert.ok(clear.requestTransmission(STEP));
+  assert.equal(clear.forecastObstacles.length, 0);
+  clear.tick();
+  assert.equal(clear.transmission.phase, 'playing');
+  clear.tick();
+  assert.equal(clear.transmission.phase, 'complete');
+  assert.ok(clear.obstacles[0].z - clear.distance > clear.viewDistance);
+  assert.ok(clear.forecastObstacles.length > 0);
+  assert.ok([...clear.obstacles, ...clear.forecastObstacles].every(({ id }) => !discarded.has(id)));
 });
 
 function verifyFiveMinuteRoute(discoveredClues, seed = 187) {

@@ -28,9 +28,19 @@ jobs:
       - uses: actions/configure-pages@v5
       - name: Stage game files
         run: |
-          mkdir -p _site/icons
-          cp index.html style.css game.js scene.js app.js manifest.webmanifest _site/
+          mkdir -p _site/audio _site/icons _site/synth
+          cp index.html style.css encounters.js bolts.js game.js episode.js scene.js audio.js app.js manifest.webmanifest _site/
+          cp audio/relay-nine.js _site/audio/
           cp icons/apple-touch-icon.png icons/icon-192.png icons/icon-512.png _site/icons/
+          cp synth/the_mountain-synthwave-593074.mp3 \
+            synth/aberrantrealities-synthetic-cohesion-566278.mp3 \
+            synth/kulakovka-dark-synthwave-624644.mp3 \
+            synth/audiorells-outrun-neon-dreams-80s-199668.mp3 \
+            synth/petrushkasound-pop-synth-background-music-465681.mp3 \
+            synth/alex-morgan-synthwave-arcade-retro-nights-573647.mp3 \
+            synth/freemusiclab-charming-phonk-i-free-background-music-i-free-music-lab-release-513626.mp3 \
+            synth/alex-morgan-gaming-stream-arcade-session-578484.mp3 \
+            synth/imageaudioteam-80s-synth-166739.mp3 _site/synth/
       - uses: actions/upload-pages-artifact@v4
         with:
           path: _site

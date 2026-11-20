@@ -3,8 +3,11 @@ const { readFileSync } = require('node:fs');
 const { join } = require('node:path');
 const test = require('node:test');
 const vm = require('node:vm');
-const { Run, STEP, LANE_COUNT, LANE_WIDTH, START_SPEED, FAST_START_SPEED, MAX_EXTRA_SPEED, REACTION_TIME,
-  MIN_VIEW_DISTANCE, VIEW_SECONDS, laneX } = require('../game.js');
+const encounters = require('../encounters.js');
+const { Run, STEP, LANE_COUNT, LANE_WIDTH, START_SPEED, ENDLESS_START_SPEED, ADVANCED_START_SPEED, FAST_START_SPEED,
+  MAX_EXTRA_SPEED, REACTION_TIME, MIN_VIEW_DISTANCE, VIEW_SECONDS, SLIDE_DISTANCE, slideGateBounds, laneX,
+  obstacles } = require('../game.js');
+const { CLUES, SAVE_KEY } = require('../episode.js');
 
 function until(run, condition) {
   for (let tick = 0; tick < 1_200 && !condition(); tick++) {
@@ -27,7 +30,7 @@ test('lane input stays within five lanes and settles on the selected lane', () =
   assert.ok(Math.abs(run.x - laneX(4)) < 0.01);
 });
 
-test('a low hurdle is jumpable, a missed obstacle ends the run, and barriers are too tall to jump', () => {
+test('a deck jump can clear either flat obstacle, and hitting a face ends the run', () => {
   const missed = new Run({ scenario: 'hurdle' });
   until(missed, () => missed.crash);
   assert.equal(missed.crash.type, 'hurdle');
@@ -44,8 +47,8 @@ test('a low hurdle is jumpable, a missed obstacle ends the run, and barriers are
   const tall = new Run({ scenario: 'barrier' });
   until(tall, () => tall.distance >= 28);
   tall.jump();
-  until(tall, () => tall.crash);
-  assert.equal(tall.crash.type, 'barrier');
+  until(tall, () => tall.distance > 48);
+  assert.equal(tall.crash, null);
 });
 
 test('a regular ground slide briefly slows forward travel without blocking movement or jumping', () => {
@@ -63,11 +66,14 @@ test('a regular ground slide briefly slows forward travel without blocking movem
     run.tick();
     assert.equal(run.lane, 3);
     assert.ok(run.x > 0);
-    const slideEnd = run.slideUntil;
+    const slideEnd = run.slideEndDistance;
     run.slide();
-    assert.equal(run.slideUntil, slideEnd);
+    assert.equal(run.slideEndDistance, slideEnd);
+    assert.equal(slideEnd, SLIDE_DISTANCE);
     until(run, () => !run.sliding);
-    assert.ok(run.time - 0.34 < STEP && run.time >= 0.34);
+    assert.ok(run.distance >= slideEnd && run.distance < slideEnd + run.speed * STEP);
+    assert.equal(run.braking, false);
+    run.tick();
     assert.equal(run.speed, run.baseSpeed);
     run.slide();
     run.jump();
@@ -84,7 +90,7 @@ test('a fresh slide just before or after touchdown gives one +15 m/s power slide
   early.jump();
   until(early, () => early.slideWindowOpen);
   assert.equal(early.airborne, true);
-  assert.ok(early.touchdownIn() <= 0.13 && early.touchdownIn() > 0.13 - STEP);
+  assert.ok(early.height <= 1 && early.height - early.verticalSpeed * STEP > 1);
   early.slide();
   early.slide();
   assert.equal(early.boosting, false);
@@ -98,6 +104,9 @@ test('a fresh slide just before or after touchdown gives one +15 m/s power slide
   assert.deepEqual(events, ['land', 'boost']);
   early.tick();
   assert.equal(early.speed, early.baseSpeed + 15);
+  until(early, () => !early.sliding);
+  assert.ok(early.distance - early.slideEndDistance < early.speed * STEP);
+  assert.ok(early.distance >= early.slideEndDistance && early.boosting);
   until(early, () => !early.boosting);
   assert.ok(early.time - touchdown - 0.85 < STEP && early.time - touchdown >= 0.85);
   assert.equal(early.speed, early.baseSpeed);
@@ -105,9 +114,8 @@ test('a fresh slide just before or after touchdown gives one +15 m/s power slide
   const late = new Run({ scenario: 'landing' });
   late.jump();
   until(late, () => !late.airborne);
-  const landedAt = late.time;
-  assert.equal(late.landingSlideUntil, landedAt + 0.09);
-  until(late, () => late.time >= landedAt + 0.08);
+  const landedAt = late.distance;
+  until(late, () => late.distance >= landedAt + 2);
   late.slide();
   assert.equal(late.boosting, true);
   assert.equal(late.airborne, false);
@@ -135,7 +143,40 @@ test('early slide presses and additional jumps miss the power slide window', () 
   assert.equal(missed.boosting, false);
 });
 
-test('an air dash retimes the slide window until after the glide', () => {
+test('grounded slide grace covers 3 m from the substep touchdown at every pace', () => {
+  for (const [speed, fraction, expected] of [[16, 0.5, true], [572, 0.5, true], [572, 0.1, false]]) {
+    let landedAt;
+    const run = new Run({ scenario: 'landing', onEvent: (event) => { if (event === 'land') landedAt = run.distance; } });
+    run.baseSpeed = speed;
+    run.airborne = true;
+    run.verticalSpeed = -8;
+    const flight = fraction * STEP;
+    run.height = 8 * flight + 23 * flight ** 2 / 2;
+    run.tick();
+    assert.ok(Math.abs(landedAt - run.distance * fraction) < 1e-12);
+    if (speed === 16) {
+      until(run, () => run.time >= 0.13);
+      assert.ok(run.distance - landedAt < 3);
+    }
+    assert.equal(run.slideWindowOpen, expected);
+    run.slide();
+    assert.equal(run.boosting, expected);
+    assert.equal(run.braking, !expected);
+  }
+
+  const expired = new Run({ scenario: 'landing' });
+  assert.equal(expired.slideWindowOpen, false);
+  expired.jump();
+  let landedAt;
+  expired.onEvent = (event) => { if (event === 'land') landedAt = expired.distance; };
+  until(expired, () => !expired.airborne);
+  until(expired, () => expired.distance - landedAt > 3);
+  assert.equal(expired.slideWindowOpen, false);
+  expired.slide();
+  assert.equal(expired.braking, true);
+});
+
+test('an air dash cancels the saved slide and a fresh press can arm it after the glide', () => {
   for (const tryAgain of [false, true]) {
     const events = [];
     const run = new Run({ scenario: 'landing', onEvent: (event) => events.push(event) });
@@ -147,7 +188,7 @@ test('an air dash retimes the slide window until after the glide', () => {
     assert.equal(run.slideWindowOpen, false);
     run.slide();
     until(run, () => run.slideWindowOpen);
-    assert.ok(run.time > run.airDashUntil - 0.13);
+    assert.ok(run.time >= run.airDashUntil);
     if (tryAgain) run.slide();
     until(run, () => !run.airborne);
     assert.equal(run.boosting, tryAgain);
@@ -246,7 +287,7 @@ test('barriers distinguish contact near the end of a dash from contact after exp
   }
 });
 
-test('dash continues to add speed for 0.7 seconds before its cooldown ends', () => {
+test('dash adds speed for 0.7 seconds and recharges in 4 seconds on clear track', () => {
   const run = new Run({ scenario: 'landing' });
   run.dash();
   until(run, () => run.time >= 0.65);
@@ -257,10 +298,16 @@ test('dash continues to add speed for 0.7 seconds before its cooldown ends', () 
   assert.equal(run.speed, run.baseSpeed);
   assert.ok(run.dashCharge < 1);
   until(run, () => run.dashCharge === 1);
-  assert.ok(Math.abs(run.time - 0.95) < 1 / 120 + Number.EPSILON);
+  assert.ok(Math.abs(run.time - 4) <= STEP + 1e-10);
 });
 
-test('the base pace starts at 32 m/s and gains 1.8 m/s per second', () => {
+test('endless pace starts at 48 m/s and practice keeps its calibrated speeds', () => {
+  const endless = new Run({ seed: 187, pace: 'fast' });
+  assert.equal(endless.speed, 48);
+  assert.equal(endless.speed, ENDLESS_START_SPEED);
+  until(endless, () => endless.time >= 1);
+  assert.ok(Math.abs(endless.speed - (48 + endless.time * 1.8)) < 1e-8);
+
   const run = new Run({ scenario: 'landing' });
   assert.equal(run.speed, 32);
   until(run, () => run.time >= 1);
@@ -270,7 +317,6 @@ test('the base pace starts at 32 m/s and gains 1.8 m/s per second', () => {
   until(fast, () => fast.time >= 1);
   assert.ok(fast.speed > 65);
   assert.equal(new Run({ scenario: 'high-speed' }).speed, 572);
-  assert.equal(new Run({ seed: 187, pace: 'fast' }).speed, START_SPEED);
 });
 
 function crossSpikes({ pace = '', scenario = 'spike-long', jumpAt, dashAt = Infinity }) {
@@ -353,38 +399,426 @@ test('both adjacent lanes of a wide spike patch collide and the neighboring rout
   assert.equal(nextLane.crash, null);
 });
 
-test('closures stop a dash at the start edge, catch lateral entry, and allow reentry at the far lip', () => {
+test('short gaps allow straight jumps and catch early takeoff or late takeoff and ground dashes', () => {
+  for (const [pace, early] of [['', 44], ['fast', 20]]) {
+    for (const [action, at, outcome] of [
+      ['jump', 59, 'clear'], ['jump', early, 'inside'], ['jump', 66, 'entrance'], ['dash', 58, 'entrance'],
+    ]) {
+      const events = [];
+      const run = new Run({ scenario: 'gap-short', pace, onEvent: (event) => events.push(event) });
+      const [gap] = run.obstacles;
+      until(run, () => run.crash || run.distance >= at);
+      run[action]();
+      until(run, () => run.crash || run.distance > gap.end + 1);
+      if (outcome === 'clear') {
+        assert.equal(run.crash, null);
+        until(run, () => !run.airborne);
+        assert.deepEqual(events, ['land']);
+      } else {
+        assert.equal(run.crash, gap);
+        assert.equal(events.includes('land'), false);
+        if (outcome === 'inside') assert.ok(run.distance > gap.z && run.distance < gap.end);
+        else assert.ok(Math.abs(run.distance - gap.z) < 1e-12);
+      }
+    }
+  }
+});
+
+test('long gaps allow air dash and lateral jumps but catch airborne landings and grounded entry', () => {
   for (const pace of ['', 'fast']) {
-    const closed = new Run({ scenario: 'gap', pace });
+    const events = [];
+    const closed = new Run({ scenario: 'gap', pace, onEvent: (event, detail) => events.push([event, detail]) });
+    const [gap] = closed.obstacles;
     until(closed, () => closed.distance >= 52);
     closed.jump();
     closed.dash();
+    until(closed, () => closed.distance > gap.z + 1);
+    assert.equal(closed.airborne, true);
+    until(closed, () => closed.time >= closed.airDashUntil && closed.height <= 1);
+    assert.equal(closed.slideWindowOpen, false);
+    closed.slide();
+    assert.equal(closed.queuedSlide, false);
     until(closed, () => closed.crash);
-    assert.equal(closed.crash.type, 'roadblock');
-    assert.equal(closed.crash.z, 66);
-    assert.equal(closed.distance, 65.64);
+    assert.equal(closed.crash, gap);
+    assert.ok(closed.distance > gap.z && closed.distance < gap.end);
+    assert.equal(closed.height, 0);
+    assert.deepEqual(events.map(([event]) => event), ['dash', 'crash']);
+    assert.deepEqual(events.at(-1)[1].impact, { x: 0, y: 0, z: closed.distance });
     assert.equal(closed.dashSpent, false);
+    assert.equal(closed.boosting, false);
+    assert.equal(closed.queuedSlide, false);
 
     const lateral = new Run({ scenario: 'gap', pace });
     lateral.move(-1);
     until(lateral, () => lateral.distance >= 86);
     lateral.jump();
-    lateral.dash();
     lateral.move(1);
+    until(lateral, () => lateral.x >= -0.8);
+    assert.ok(lateral.airborne);
+    lateral.move(1);
+    until(lateral, () => lateral.x > 1.25);
+    assert.ok(lateral.airborne);
+    until(lateral, () => lateral.slideWindowOpen);
+    lateral.slide();
+    until(lateral, () => !lateral.airborne);
+    assert.ok(lateral.boosting && lateral.distance < gap.end);
+    lateral.move(-1);
     until(lateral, () => lateral.crash);
     assert.equal(lateral.crash.type, 'gap');
-    assert.ok(lateral.distance > 86 && lateral.distance < 386);
+    assert.ok(Math.abs(lateral.x - 1.25) < 1e-12);
 
     const resumed = new Run({ scenario: 'gap', pace });
     resumed.move(-1);
-    until(resumed, () => resumed.distance >= 386);
+    until(resumed, () => resumed.distance >= gap.end - 8);
+    resumed.jump();
     resumed.move(1);
-    until(resumed, () => resumed.distance > 393);
+    until(resumed, () => resumed.x > -1.25);
+    assert.ok(resumed.airborne && resumed.distance < gap.end);
+    until(resumed, () => !resumed.airborne);
     assert.equal(resumed.crash, null);
+    assert.ok(resumed.distance > gap.end);
   }
 });
 
-test('distance gates introduce hazards and increase lane coverage even when rows are prefetched', () => {
+test('air dash can extend a straight jump beyond a far lip', () => {
+  for (const dash of [false, true]) {
+    const run = new Run({ scenario: 'landing' });
+    const end = run.addClosure(66, 2, 42);
+    until(run, () => run.distance >= 52);
+    run.jump();
+    if (dash) run.dash();
+    until(run, () => run.crash || !run.airborne);
+    if (dash) {
+      assert.equal(run.crash, null);
+      assert.ok(run.distance > end);
+    } else {
+      assert.equal(run.crash.type, 'gap');
+      assert.ok(run.distance < end);
+    }
+  }
+});
+
+test('high-speed touchdown checks the swept position and the far lip before committing landing effects', () => {
+  const speed = 572;
+  const touchdown = STEP / 2;
+  const landingZ = (speed + 1.8 * STEP) * touchdown;
+  for (const offset of [0, 90_000]) {
+    const tickEnd = offset + landingZ * 2;
+    const lip = offset + (tickEnd - offset) / 2;
+    for (const [near, far, expectedEvents, impactZ] of [
+      [offset + 1, lip + 0.001, ['crash'], lip],
+      [offset + 1, lip, ['land', 'boost']],
+      [offset + 1, lip - 0.001, ['land', 'boost']],
+      [lip, offset + 3, ['crash'], lip],
+      [lip + 0.5, offset + 4, ['land', 'boost', 'crash'], lip + 0.5],
+    ]) {
+      const events = [];
+      const run = new Run({ scenario: 'landing', onEvent: (event) => events.push(event) });
+      run.distance = offset;
+      run.baseSpeed = speed;
+      run.airborne = true;
+      run.verticalSpeed = -8;
+      run.height = -run.verticalSpeed * touchdown + 23 * touchdown ** 2 / 2;
+      run.slide();
+      assert.equal(run.queuedSlide, true);
+      run.addClosure(near, 2, far - near);
+      run.tick();
+      assert.deepEqual(events, expectedEvents, `void [${near}, ${far})`);
+      if (impactZ === undefined) assert.equal(run.crash, null);
+      else {
+        assert.equal(run.crash.type, 'gap');
+        assert.equal(run.height, 0);
+        assert.ok(Math.abs(run.distance - impactZ) < 1e-12);
+      }
+    }
+  }
+
+  const exiting = new Run({ scenario: 'landing' });
+  exiting.baseSpeed = speed;
+  exiting.airborne = true;
+  exiting.verticalSpeed = -8;
+  exiting.height = -exiting.verticalSpeed * touchdown + 23 * touchdown ** 2 / 2;
+  exiting.x = 1.1;
+  exiting.move(1);
+  exiting.addClosure(0, 2, 5);
+  exiting.tick();
+  assert.equal(exiting.crash.type, 'gap', 'The tick ends past the lateral edge, but touchdown is over the gap');
+  assert.ok(exiting.x < 1.25 && Math.abs(exiting.distance - landingZ) < 1e-12);
+});
+
+test('a default transmission rejects repeats and advances only on playback ticks', () => {
+  const run = new Run({ scenario: 'landing' });
+  assert.equal(run.transmission, null);
+  for (const duration of [0, -1, Infinity, NaN, '8', null]) {
+    assert.throws(() => run.requestTransmission(duration), RangeError);
+    assert.equal(run.transmission, null);
+  }
+  assert.equal(run.requestTransmission(), true);
+  assert.deepEqual(run.transmission, { phase: 'draining', elapsed: 0, duration: 8 });
+  assert.equal(run.requestTransmission(2), false);
+  run.tick();
+  assert.deepEqual(run.transmission, { phase: 'playing', elapsed: 0, duration: 8 });
+  for (let tick = 1; tick < 960; tick++) {
+    run.tick();
+    assert.equal(run.transmission.phase, 'playing');
+    assert.equal(run.transmission.elapsed, tick * STEP);
+  }
+  run.tick();
+  assert.deepEqual(run.transmission, { phase: 'complete', elapsed: 8, duration: 8 });
+  assert.equal(run.requestTransmission(2), false);
+  assert.throws(() => run.requestTransmission(-1), RangeError);
+  run.tick();
+  assert.deepEqual(run.transmission, { phase: 'complete', elapsed: 8, duration: 8 });
+  assert.deepEqual(run.obstacles, [], 'Scripted runs never start endless generation');
+
+  const brief = new Run({ scenario: 'landing' });
+  brief.requestTransmission(STEP / 2);
+  brief.tick();
+  assert.equal(brief.transmission.elapsed, 0);
+  brief.tick();
+  assert.deepEqual(brief.transmission, { phase: 'complete', elapsed: STEP / 2, duration: STEP / 2 });
+});
+
+test('a fresh run can take a later clue and rejects invalid, active, or out-of-order requests', () => {
+  const run = new Run({ scenario: 'landing' });
+  for (const clue of [0, -1, 5, 3.5, NaN, '3', null]) {
+    assert.equal(run.requestTransmission(STEP, clue), false);
+    assert.equal(run.transmission, null);
+  }
+  assert.equal(run.requestTransmission(STEP, 3), true);
+  assert.equal(run.requestTransmission(STEP, 4), false);
+  run.tick();
+  assert.equal(run.requestTransmission(STEP, 4), false);
+  run.tick();
+  assert.deepEqual(run.transmission, { phase: 'complete', elapsed: STEP, duration: STEP });
+  for (const clue of [1, 2, 3]) assert.equal(run.requestTransmission(STEP, clue), false);
+  assert.equal(run.requestTransmission(3 * STEP, 4), true);
+  run.tick();
+  run.tick();
+  assert.deepEqual(run.transmission, { phase: 'playing', elapsed: STEP, duration: 3 * STEP });
+  run.tick();
+  run.tick();
+  assert.deepEqual(run.transmission, { phase: 'complete', elapsed: 3 * STEP, duration: 3 * STEP });
+  assert.equal(run.requestTransmission(STEP, 4), false);
+});
+
+test('playback waits for the runner rear to clear the end of each queued hazard', () => {
+  const tails = [
+    (run) => { run.addObstacle(20, 4, 'hurdle'); return 20.25; },
+    (run) => { run.addObstacle(20, 4, 'barrier'); return 20.32; },
+    (run) => run.addClosure(20, 4, 0.5, true),
+    (run) => run.addSpikes(20, 3, 2, 2),
+    (run) => {
+      const lip = run.addClosure(20, 0, 250);
+      run.addObstacle(lip - 2, 4, 'barrier');
+      return lip;
+    },
+  ];
+  for (const addTail of tails) {
+    const run = new Run({ scenario: 'landing' });
+    run.addObstacle(8, 1, 'hurdle');
+    run.addObstacle(10, 3, 'barrier');
+    const end = addTail(run);
+    const tail = run.obstacles.find((obstacle) => obstacle.end === end) ?? run.obstacles.find((obstacle) => obstacle.z === 20);
+    run.distance = end - 0.1;
+    assert.equal(run.requestTransmission(1), true);
+    run.tick();
+    assert.ok(run.distance > end && run.distance < end + 0.36);
+    assert.deepEqual(run.transmission, { phase: 'draining', elapsed: 0, duration: 1 });
+    run.tick();
+    assert.ok(run.distance > end + 0.36);
+    assert.deepEqual(run.transmission, { phase: 'playing', elapsed: 0, duration: 1 });
+    assert.ok(run.obstacles.includes(tail), 'Passed hazards retain their ordinary rear rendering');
+  }
+});
+
+test('a collision while draining wins over playback and a fresh run can take the pending transmission', () => {
+  const fast = new Run({ scenario: 'landing' });
+  fast.baseSpeed = 572;
+  fast.addObstacle(2, 2, 'hurdle');
+  assert.equal(fast.requestTransmission(), true);
+  fast.tick();
+  assert.equal(fast.crash.type, 'hurdle');
+  assert.ok(Math.abs(fast.distance - 1.39) < 1e-12);
+  assert.deepEqual(fast.transmission, { phase: 'draining', elapsed: 0, duration: 8 });
+  assert.equal(fast.requestTransmission(), false);
+  assert.equal(fast.requestTransmission(STEP, 2), false);
+
+  const lateral = new Run({ scenario: 'gap' });
+  lateral.move(1);
+  assert.equal(lateral.requestTransmission(), true);
+  until(lateral, () => lateral.distance >= 100);
+  lateral.move(-1);
+  until(lateral, () => lateral.crash);
+  assert.equal(lateral.crash.type, 'gap');
+  assert.equal(lateral.transmission.phase, 'draining');
+
+  const fresh = new Run({ scenario: 'hurdle' });
+  assert.equal(fresh.transmission, null);
+  assert.equal(fresh.requestTransmission(), true);
+  assert.deepEqual(fresh.obstacles.map(({ z, lane, type }) => [z, lane, type]), [[42, 2, 'hurdle']]);
+  fresh.move(1);
+  until(fresh, () => fresh.transmission.phase === 'complete');
+  assert.deepEqual(fresh.obstacles, []);
+});
+
+test('a live transmission keeps movement, timing, meters and action events identical to normal running', () => {
+  const playEvents = [];
+  const normalEvents = [];
+  const play = new Run({ scenario: 'landing', onEvent: (event) => playEvents.push(event) });
+  const normal = new Run({ scenario: 'landing', onEvent: (event) => normalEvents.push(event) });
+  assert.equal(play.requestTransmission(), true);
+  const fields = ['time', 'distance', 'baseSpeed', 'speed', 'lane', 'x', 'height', 'verticalSpeed', 'airborne',
+    'queuedSlide', 'slideWindowOpen', 'sliding', 'braking', 'boosting', 'dashing', 'dashCharge'];
+  for (let tick = 0; tick < 360; tick++) {
+    for (const run of [play, normal]) {
+      if (tick === 1) run.slide();
+      if (tick === 8) run.move(-1);
+      if (tick === 50) run.jump();
+      if (tick === 68) run.dash();
+      if (run.slideWindowOpen && !run.boosting) run.slide();
+      run.tick();
+      assert.equal(run.crash, null);
+    }
+    assert.equal(play.transmission.phase, 'playing');
+    assert.equal(normal.transmission, null);
+    assert.deepEqual(play.obstacles, []);
+    assert.deepEqual(fields.map((field) => play[field]), fields.map((field) => normal[field]));
+  }
+  assert.deepEqual(playEvents, ['dash', 'land', 'boost']);
+  assert.deepEqual(playEvents, normalEvents);
+});
+
+test('an interrupted closure drains across all lanes and endless generation restarts at full high-speed warning', () => {
+  for (let lane = 0; lane < LANE_COUNT; lane++) {
+    const run = new Run({ seed: lane + 1 });
+    run.distance = 90_000;
+    run.baseSpeed = run.speed = 572;
+    run.obstacles.length = 0;
+    run.introduction = 4;
+    const start = run.distance + 40;
+    run.placeClosureRow(start, 4);
+    const lip = run.closure.end;
+    run.addObstacle(start + 400, 0, 'hurdle');
+    run.lastHazardEnd = start + 400;
+    run.openLanes = [3];
+    run.nextSpikes = start - 1;
+    run.nextClosure = start - 1;
+    const nextId = run.id;
+
+    assert.equal(run.requestTransmission(1), true);
+    until(run, () => run.distance > start + 400);
+    assert.equal(run.transmission.phase, 'draining');
+    assert.equal(run.id, nextId, 'Partially planned closures receive no new interior rows');
+    assert.ok(run.obstacles.some(({ type, end }) => type === 'gap' && end === lip));
+    until(run, () => run.transmission.phase === 'playing');
+    assert.ok(run.distance > lip + 0.36);
+    assert.equal(run.id, nextId);
+    while (run.lane !== lane) run.move(lane - run.lane);
+    run.jump();
+    until(run, () => run.slideWindowOpen);
+    run.slide();
+    until(run, () => run.transmission.elapsed === 119 * STEP);
+    assert.equal(run.boosting, true);
+    assert.equal(run.id, nextId);
+    assert.ok(run.obstacles.every(({ z, end = z }) => end < run.distance));
+    assert.ok(Math.abs(run.x - laneX(lane)) < 1e-8);
+
+    run.dash();
+    run.tick();
+    assert.equal(run.transmission.phase, 'complete');
+    assert.ok(run.speed - run.baseSpeed > MAX_EXTRA_SPEED - 0.2);
+    const resumed = run.obstacles.filter(({ id }) => id >= nextId);
+    const firstZ = resumed[0].z;
+    const approach = (run.baseSpeed + MAX_EXTRA_SPEED) * VIEW_SECONDS + 0.9 * VIEW_SECONDS ** 2;
+    assert.ok(firstZ - run.distance - 0.68 >= approach);
+    assert.ok(firstZ <= run.distance + run.viewDistance + run.rowClearance(run.distance));
+    assert.ok(run.lastHazardEnd >= run.distance + run.viewDistance);
+    assert.ok(resumed.every(({ z, type }) => z === firstZ && ['barrier', 'hurdle'].includes(type)));
+    assert.ok(run.nextSpikes > firstZ && run.nextClosure > firstZ);
+    assert.equal(run.closure, null);
+    assert.equal(run.introduction, 4);
+    const firstOpenLanes = run.openLanes;
+    for (let from = 0; from < LANE_COUNT; from++) {
+      assert.ok(firstOpenLanes.some((open) => Math.abs(from - open) <= 1), `Lane ${from} must reach the first row`);
+    }
+    const completionTime = run.time;
+    until(run, () => firstZ - run.distance < run.viewDistance * 0.9);
+    const safe = [lane, lane - 1, lane + 1].find((next) => firstOpenLanes.includes(next));
+    run.move(safe - lane);
+    until(run, () => run.distance > firstZ + 1);
+    assert.equal(run.crash, null);
+    assert.ok(run.time - completionTime >= VIEW_SECONDS);
+  }
+});
+
+test('a staged introduction resumes with full warning and a one-move route from every lane at 572 m/s', () => {
+  const run = new Run({ seed: 187 });
+  run.distance = 900;
+  run.baseSpeed = run.speed = 572;
+  run.obstacles.length = 0;
+  run.introduction = 2;
+  run.openLanes = [2];
+  run.nextSpikes = 500;
+  assert.equal(run.requestTransmission(STEP), true);
+  run.tick();
+  assert.equal(run.transmission.phase, 'playing');
+  assert.equal(run.introduction, 2);
+  run.tick();
+  assert.equal(run.transmission.phase, 'complete');
+  const [first] = run.obstacles;
+  assert.deepEqual([first.type, first.lane, first.tiles, first.lanes], ['spikes', 2, 1, 2]);
+  assert.equal(run.introduction, 3);
+  assert.ok(first.z - 0.36 >= run.distance + run.viewDistance);
+  for (let lane = 0; lane < LANE_COUNT; lane++) {
+    assert.ok(run.openLanes.some((open) => Math.abs(lane - open) <= 1));
+  }
+});
+
+test('all four clues can drain and resume the same boosted endless run with full warning each time', (t) => {
+  t.mock.method(encounters, 'placeEncounter', () => false);
+  const run = new Run({ seed: 187, discoveredClues: 4 });
+  run.baseSpeed = run.speed = 572;
+  run.distance = 90_000;
+  run.obstacles.length = 0;
+  run.addSpikes(run.distance + 600, 3, 2, 2);
+  for (const clue of [1, 2, 3, 4]) {
+    const duration = 4.5;
+    const nextId = run.id;
+    const clearance = Math.max(...run.obstacles.map(({ z, end = z, type }) =>
+      end + (type === 'gap' || type === 'spikes' ? 0.36 : type === 'barrier' ? 0.68 : 0.61)));
+    const blocked = new Set(run.obstacles.filter(({ z }) => z > run.distance)
+      .flatMap(({ lane, lanes = 1 }) => Array.from({ length: lanes }, (_, offset) => lane + offset)));
+    const safe = [run.lane, run.lane - 1, run.lane + 1].find((lane) => lane >= 0 && lane < LANE_COUNT && !blocked.has(lane));
+    assert.ok(safe !== undefined);
+    run.move(safe - run.lane);
+    assert.equal(run.requestTransmission(duration, clue), true);
+    until(run, () => run.transmission.phase === 'playing');
+    assert.ok(run.distance > clearance);
+    assert.equal(run.id, nextId);
+    assert.equal(run.transmission.elapsed, 0);
+
+    until(run, () => run.transmission.elapsed >= duration - 1);
+    run.jump();
+    until(run, () => run.slideWindowOpen);
+    run.slide();
+    until(run, () => run.transmission.elapsed === duration - STEP);
+    assert.equal(run.id, nextId);
+    assert.equal(run.boosting, true);
+    run.dash();
+    run.tick();
+    assert.equal(run.transmission.phase, 'complete');
+    assert.ok(run.speed - run.baseSpeed > MAX_EXTRA_SPEED - 0.2);
+    const first = run.obstacles.find(({ id }) => id >= nextId);
+    const warning = (run.baseSpeed + MAX_EXTRA_SPEED) * VIEW_SECONDS + 0.9 * VIEW_SECONDS ** 2;
+    assert.ok(first.z - run.distance - 0.68 >= warning);
+    assert.ok(run.obstacles.every(({ id, z }) => id < nextId || z === first.z));
+    assert.equal(run.requestTransmission(duration, clue), false);
+  }
+});
+
+test('standard course distance gates increase lane coverage even when rows are prefetched', (t) => {
+  t.mock.method(encounters, 'placeEncounter', () => false);
   class PrefetchedRun extends Run {
     get viewDistance() { return 9000; }
   }
@@ -417,8 +851,7 @@ test('distance gates introduce hazards and increase lane coverage even when rows
     for (const [index, intro] of introductions.entries()) {
       assert.ok(intro.z >= gates[index] && intro.z < gates[index + 1],
         `Seed ${seed} introduces ${intro.type} at ${intro.z} m`);
-      assert.deepEqual(rows.get(intro.z).map(({ type }) => type),
-        intro.type === 'gap' ? ['roadblock', 'gap'] : ['spikes']);
+      assert.deepEqual(rows.get(intro.z).map(({ type }) => type), [intro.type]);
     }
 
     let closedUntil = 0;
@@ -429,16 +862,16 @@ test('distance gates introduce hazards and increase lane coverage even when rows
       if (gap) closedUntil = gap.end;
       else if (spike) stage.combinedSpikes.push(Number(spike.tiles === 2 && spike.lanes === 2));
       else if (z < closedUntil) stage.interior.push(row.length);
-      else stage.standard.push(row.length);
+      else if (z > barrier.z) stage.standard.push(row.length);
     }
   }
 
   const average = (rows) => rows.reduce((sum, value) => sum + value, 0) / rows.length;
   const [early, middle, late] = stages;
-  assert.ok(early.standard.every((count) => count === 1));
+  assert.ok(early.standard.length > 0 && early.standard.every((count) => count === 2));
   assert.ok(early.interior.every((count) => count === 1));
   assert.ok(early.combinedSpikes.every((combined) => !combined));
-  assert.ok(average(middle.standard) >= 2);
+  assert.ok(average(middle.standard) > average(early.standard));
   assert.ok(average(late.standard) > average(middle.standard) + 0.3);
   assert.ok(average(middle.interior) > 1);
   assert.ok(average(late.interior) > average(middle.interior) + 0.2);
@@ -446,19 +879,196 @@ test('distance gates introduce hazards and increase lane coverage even when rows
   assert.ok(average(late.combinedSpikes) > average(middle.combinedSpikes) + 0.1);
 });
 
-test('seeded courses keep one-move reachability and reaction time across full closure spans', () => {
-  for (let seed = 1; seed <= 24; seed++) {
-    const run = new Run({ seed });
-    assert.equal(run.speed, START_SPEED);
+test('every opening lane needs a response and steering alone clears the short entrance', () => {
+  const lanes = Array.from({ length: LANE_COUNT }, (_, lane) => lane);
+  for (const seed of [...lanes, 42, 187, 188, 123456789, 0xffffffff]) {
+    for (const startingLane of lanes) {
+      const coast = new Run({ seed });
+      const active = new Run({ seed });
+      for (const run of [coast, active]) {
+        while (run.lane !== startingLane) run.move(startingLane - run.lane);
+      }
+      until(coast, () => coast.crash);
+      if (startingLane === 2) {
+        assert.equal(coast.crash.type, 'hurdle');
+        assert.ok(coast.time >= 1.5 && coast.time <= 1.8);
+      } else {
+        assert.ok(coast.time >= 4.5 && coast.time <= 6.5,
+          `Seed ${seed}, lane ${startingLane} first hit at ${coast.time} s`);
+      }
+
+      let lastEnd = 0;
+      let decisions = 0;
+      while (active.time < 8) {
+        const z = active.obstacles.find((obstacle) => obstacle.z > lastEnd)?.z;
+        assert.ok(z > lastEnd);
+        const row = active.obstacles.filter((obstacle) => obstacle.z === z);
+        const lane = [active.lane, active.lane - 1, active.lane + 1].find((candidate) =>
+          lanes.includes(candidate) && !row.some(({ lane, lanes = 1 }) => candidate >= lane && candidate < lane + lanes));
+        assert.ok(lane !== undefined, `Seed ${seed}, lane ${active.lane} has no one-move exit at ${z} m`);
+        if (lane !== active.lane) {
+          active.move(lane - active.lane);
+          decisions++;
+        }
+        lastEnd = Math.max(...row.map((obstacle) => obstacle.end ?? z));
+        until(active, () => active.distance > lastEnd + 1 || active.time >= 8);
+        assert.equal(active.crash, null);
+      }
+      assert.ok(decisions >= 1, `Seed ${seed}, lane ${startingLane} never steered in the first 8 s`);
+    }
+  }
+});
+
+test('the standard advanced opening mixes three-lane rows and schedules spikes and gaps earlier', (t) => {
+  t.mock.method(encounters, 'placeEncounter', () => false);
+  class PrefetchedRun extends Run {
+    get viewDistance() { return 3000; }
+  }
+
+  const lanes = Array.from({ length: LANE_COUNT }, (_, lane) => lane);
+  const elapsedAt = (z, speed) => (Math.sqrt(speed ** 2 + 3.6 * z) - speed) / 1.8;
+  for (const seed of [0, 1, 42, 187, 188, 123456789, 0xffffffff]) {
+    const regular = new PrefetchedRun({ seed });
+    const advanced = new PrefetchedRun({ seed, advanced: true });
+    assert.equal(advanced.distance, 0);
+    assert.equal(advanced.speed, ADVANCED_START_SPEED);
+    assert.deepEqual(advanced.obstacles, new PrefetchedRun({ seed, advanced: true }).obstacles);
+    assert.notDeepEqual(advanced.obstacles, new PrefetchedRun({ seed: seed + 1, advanced: true }).obstacles);
+
+    const opening = Object.values(Object.groupBy(advanced.obstacles, ({ z }) => z)).slice(0, 3);
+    const openRows = opening.map((row) => {
+      assert.equal(row.length, 3);
+      assert.deepEqual(new Set(row.map(({ type }) => type)), new Set(['hurdle', 'barrier']));
+      return lanes.filter((lane) => !row.some((obstacle) => obstacle.lane === lane));
+    });
+    assert.deepEqual(new Set(openRows.flat()), new Set(lanes));
+    assert.ok(elapsedAt(opening[0][0].z - 0.68, advanced.speed) >= elapsedAt(78 - 0.61, regular.speed));
+    for (const type of ['spikes', 'gap']) {
+      const first = (run) => run.obstacles.find((obstacle) => obstacle.type === type).z;
+      assert.ok(elapsedAt(first(advanced), advanced.speed) < elapsedAt(first(regular), regular.speed));
+    }
+
+    for (const startingLane of lanes) {
+      const coast = new Run({ seed, advanced: true });
+      const route = new Run({ seed, advanced: true });
+      while (coast.lane !== startingLane) coast.move(startingLane - coast.lane);
+      while (route.lane !== startingLane) route.move(startingLane - route.lane);
+      until(coast, () => coast.crash || coast.distance > opening[1][0].z + 1);
+      assert.ok(coast.crash, `Seed ${seed} allows lane ${startingLane} to coast past both opening rows`);
+
+      for (const [index, row] of opening.entries()) {
+        const open = openRows[index];
+        const nextLane = open.find((lane) => Math.abs(lane - route.lane) <= 1);
+        assert.ok(nextLane !== undefined, `Seed ${seed}, row ${index} traps lane ${route.lane}`);
+        if (index > 0) assert.notEqual(nextLane, route.lane);
+        route.move(nextLane - route.lane);
+        until(route, () => route.distance > row[0].z + 1);
+        assert.equal(route.crash, null);
+      }
+    }
+  }
+});
+
+const launchSpeeds = [48, 80, 112, 144, 176];
+
+test('completed clues set the next endless run pace and music from zero real meters', () => {
+  for (const [discoveredClues, launchSpeed] of launchSpeeds.entries()) {
+    const run = new Run({ seed: 187, discoveredClues, pace: 'fast' });
+    assert.equal(run.musicTierFloor, discoveredClues + 1);
+    assert.equal(run.distance, 0);
+    assert.equal(run.time, 0);
+    assert.equal(run.speed, launchSpeed);
+    assert.equal(run.baseSpeed, launchSpeed);
+    assert.ok(run.viewDistance >= (launchSpeed + MAX_EXTRA_SPEED) * VIEW_SECONDS);
+    run.tick();
+    assert.equal(run.distance, (launchSpeed + 1.8 * STEP) * STEP);
+    assert.equal(run.speed, launchSpeed + 1.8 * STEP);
+  }
+  for (const [count, bounded] of [[-1, 0], [Infinity, 0], [NaN, 0], ['4', 0], [null, 0], [2.8, 2], [99, 4]]) {
+    const run = new Run({ discoveredClues: count });
+    assert.equal(run.musicTierFloor, bounded + 1);
+    assert.equal(run.speed, launchSpeeds[bounded]);
+  }
+  assert.equal(new Run({ advanced: true, discoveredClues: 0 }).speed, ENDLESS_START_SPEED);
+  const legacy = new Run({ seed: 187, advanced: true });
+  const explicit = new Run({ seed: 187, discoveredClues: 1 });
+  assert.equal(legacy.musicTierFloor, explicit.musicTierFloor);
+  assert.equal(legacy.speed, explicit.speed);
+  assert.deepEqual(legacy.obstacles, explicit.obstacles);
+});
+
+test('scripted scenarios retain their pace and layouts at every clue count', () => {
+  for (const scenario of ['landing', 'spike-long', 'high-speed']) {
+    for (const pace of ['', 'fast']) {
+      const baseline = new Run({ scenario, pace });
+      const progressed = new Run({ scenario, pace, advanced: true, discoveredClues: 4 });
+      assert.equal(progressed.musicTierFloor, 1);
+      assert.equal(progressed.advanced, false);
+      assert.equal(progressed.speed, baseline.speed);
+      assert.deepEqual(progressed.obstacles, baseline.obstacles);
+    }
+  }
+});
+
+test('the first eight seconds of the standard course build toward wider and longer spikes across tiers', (t) => {
+  t.mock.method(encounters, 'placeEncounter', () => false);
+  class PrefetchedRun extends Run {
+    get viewDistance() { return 3000; }
+  }
+
+  const samples = launchSpeeds.map((launchSpeed, discoveredClues) => {
+    const openingDistance = 8 * launchSpeed + 0.9 * 8 ** 2;
+    let spikeTilesAcrossLanes = 0;
+    let mixedSpikeRows = 0;
+    let singleLaneExits = 0;
+    for (let seed = 1; seed <= 32; seed++) {
+      const run = new PrefetchedRun({ seed, discoveredClues });
+      assert.deepEqual(run.obstacles, new PrefetchedRun({ seed, discoveredClues }).obstacles);
+      const opening = run.obstacles.filter(({ z }) => z < openingDistance);
+      const rows = Object.values(Object.groupBy(opening, ({ z }) => z));
+      const earliest = rows[0][0].z - 0.68;
+      assert.ok(earliest >= 1.5 * launchSpeed + 0.9 * 1.5 ** 2);
+      assert.ok(earliest >= REACTION_TIME * (launchSpeed + MAX_EXTRA_SPEED) + 0.9 * REACTION_TIME ** 2);
+      for (const row of rows) {
+        const spike = row.find(({ type }) => type === 'spikes');
+        if (spike) {
+          spikeTilesAcrossLanes += spike.tiles * spike.lanes;
+          mixedSpikeRows += Number(row.length > 1);
+        }
+        singleLaneExits += Number(row.reduce((blocked, item) => blocked + (item.lanes ?? 1), 0) === LANE_COUNT - 1);
+      }
+    }
+    return { spikeTilesAcrossLanes, mixedSpikeRows, singleLaneExits };
+  });
+
+  for (let index = 1; index < samples.length; index++) {
+    assert.ok(samples[index].spikeTilesAcrossLanes > samples[index - 1].spikeTilesAcrossLanes);
+  }
+  assert.equal(samples[0].mixedSpikeRows, 0);
+  assert.equal(samples[1].mixedSpikeRows, 0);
+  assert.ok(samples[2].mixedSpikeRows > 0);
+  assert.ok(samples[3].mixedSpikeRows > samples[2].mixedSpikeRows);
+  assert.ok(samples[4].mixedSpikeRows >= samples[3].mixedSpikeRows);
+  assert.ok(samples[4].singleLaneExits > samples[3].singleLaneExits);
+});
+
+test('standard rows keep one-move reachability and reaction time across full closure spans', (t) => {
+  t.mock.method(encounters, 'placeEncounter', () => false);
+  const seeds = Array.from({ length: 24 }, (_, index) => index + 1);
+  for (const [discoveredClues, seed] of launchSpeeds.flatMap((_, clues) => seeds.map((seed) => [clues, seed]))) {
+    const run = new Run({ seed, discoveredClues });
+    const launchSpeed = launchSpeeds[discoveredClues];
+    assert.equal(run.speed, launchSpeed);
     let lastRow = 0;
     let lastEnd = 0;
     let sawSpikes = false;
+    let shortGaps = 0;
     let closure = null;
     let closuresCompleted = 0;
     let previousClosureEnd = 0;
     const lanes = Array.from({ length: LANE_COUNT }, (_, lane) => lane);
     let open = lanes;
-    while (run.distance < 4000 || closure) {
+    while (run.time < 40 || closure) {
       const z = run.obstacles.find((obstacle) => obstacle.z > lastRow)?.z;
       assert.ok(z > lastRow, 'The next row should be generated ahead of the runner');
       if (closure && z >= closure.gap.end) {
@@ -476,9 +1086,10 @@ test('seeded courses keep one-move reachability and reaction time across full cl
         closure = null;
       }
       const row = run.obstacles.filter((obstacle) => obstacle.z === z);
-      const end = Math.max(...row.map((obstacle) => obstacle.type === 'spikes' ? obstacle.end : obstacle.z));
+      const end = Math.max(...row.map((obstacle) => obstacle.short || obstacle.type === 'spikes' ? obstacle.end : obstacle.z));
       const blocked = new Set(row.flatMap((obstacle) => Array.from({ length: obstacle.lanes ?? 1 },
         (_, offset) => obstacle.lane + offset)));
+      assert.equal(blocked.size, row.reduce((coverage, item) => coverage + (item.lanes ?? 1), 0));
       sawSpikes ||= row.some((obstacle) => obstacle.type === 'spikes');
       if (closure) {
         assert.ok(!blocked.has(closure.gap.lane), 'Interior obstacles occupy usable lanes');
@@ -497,14 +1108,17 @@ test('seeded courses keep one-move reachability and reaction time across full cl
       until(run, () => run.distance > z + 1);
       const approachSpeed = run.baseSpeed;
       until(run, () => run.distance > end + 1);
-      const speedAfterPrevious = Math.sqrt(START_SPEED ** 2 + 3.6 * lastEnd);
+      const speedAfterPrevious = Math.sqrt(launchSpeed ** 2 + 3.6 * lastEnd);
       const minimumReactionDistance = (speedAfterPrevious + MAX_EXTRA_SPEED) * REACTION_TIME + 0.9 * REACTION_TIME ** 2;
       assert.ok(z - lastEnd - 1.4 >= minimumReactionDistance,
         `seed ${seed}: ${lastEnd} to ${z} at ${approachSpeed} m/s`);
       const gap = row.find((obstacle) => obstacle.type === 'gap');
-      if (gap) {
+      if (gap?.short) {
+        shortGaps++;
+        assert.ok(gap.end - gap.z > 0.4 * approachSpeed && gap.end - gap.z < 0.55 * approachSpeed);
+      } else if (gap) {
         assert.equal(closure, null);
-        assert.ok(gap.z - previousClosureEnd >= 3.55 * (START_SPEED + MAX_EXTRA_SPEED));
+        assert.ok(gap.z - previousClosureEnd >= 3.55 * (launchSpeed + MAX_EXTRA_SPEED));
         closure = { gap, began: run.time, entrySpeed: approachSpeed,
           openNeighbors: lanes.filter((lane) => Math.abs(lane - gap.lane) === 1), beats: 0 };
       }
@@ -515,11 +1129,30 @@ test('seeded courses keep one-move reachability and reaction time across full cl
     assert.ok(run.baseSpeed > 120);
     assert.equal(sawSpikes, true);
     assert.ok(closuresCompleted >= 2);
+    assert.ok(shortGaps >= 1);
   }
 });
 
-test('the endless generator carries a reachable run past 140 m/s and through five minutes at 572 m/s', () => {
-  const run = new Run({ seed: 187 });
+test('a normal jump clears a generated short gap after a standard closure', (t) => {
+  t.mock.method(encounters, 'placeEncounter', () => false);
+  let landing;
+  const run = new Run({ seed: 187, onEvent: (event) => { if (event === 'land') landing = run.distance; } });
+  for (const [distance, direction] of [[51, -1], [304, -1], [515, 1], [778, -1], [1024, 1]]) {
+    until(run, () => run.distance >= distance);
+    run.move(direction);
+  }
+  until(run, () => run.distance >= 1795);
+  const short = run.obstacles.find((obstacle) => obstacle.short);
+  assert.ok(short && short.lane === run.lane && run.distance < short.z);
+  run.jump();
+  until(run, () => !run.airborne);
+  assert.equal(run.crash, null);
+  assert.ok(landing > short.end);
+});
+
+function verifyFiveMinuteRoute(discoveredClues, seed = 187) {
+  const launchSpeed = launchSpeeds[discoveredClues];
+  const run = new Run({ seed, discoveredClues });
   const gaps = new Map();
   const seen = new Set();
   let widestCourseBuffer = 0;
@@ -537,7 +1170,7 @@ test('the endless generator carries a reachable run past 140 m/s and through fiv
     for (const item of run.obstacles) {
       if (seen.has(item.id)) continue;
       seen.add(item.id);
-      if (item.type === 'gap') gaps.set(item.id, { gap: item, interior: [] });
+      if (item.type === 'gap' && !item.short) gaps.set(item.id, { gap: item, interior: [] });
       const containing = [...gaps.values()].find(({ gap }) => item.z > gap.z && item.z < gap.end);
       if (containing) containing.interior.push(item);
     }
@@ -554,7 +1187,7 @@ test('the endless generator carries a reachable run past 140 m/s and through fiv
     if (tick === 7200 || tick === 36_000) {
       const elapsed = tick * STEP;
       assert.ok(Math.abs(run.time - elapsed) < 1e-7);
-      assert.ok(Math.abs(run.speed - (32 + 1.8 * elapsed)) < 1e-7);
+      assert.ok(Math.abs(run.speed - (launchSpeed + 1.8 * elapsed)) < 1e-7);
       assert.ok(run.viewDistance >= (run.speed + MAX_EXTRA_SPEED) * VIEW_SECONDS);
       assert.ok(run.lastHazardEnd >= run.distance + run.viewDistance);
     }
@@ -572,6 +1205,21 @@ test('the endless generator carries a reachable run past 140 m/s and through fiv
     assert.ok(ended - began >= 3 - STEP);
   }
   assert.ok(widestCourseBuffer <= 20);
+}
+
+test('the regular lane-only route reaches 588 m/s after five minutes', (t) => {
+  t.mock.method(encounters, 'placeEncounter', () => false);
+  verifyFiveMinuteRoute(0);
+});
+
+test('the advanced lane-only route reaches 620 m/s after five minutes', (t) => {
+  t.mock.method(encounters, 'placeEncounter', () => false);
+  verifyFiveMinuteRoute(1);
+});
+
+test('the final lane-only launch tier reaches 716 m/s after five minutes on three seeds', (t) => {
+  t.mock.method(encounters, 'placeEncounter', () => false);
+  for (const seed of [42, 187, 0xffffffff]) verifyFiveMinuteRoute(4, seed);
 });
 
 test('high speed keeps short jumps and the two-tile airborne dash contract', () => {
@@ -610,6 +1258,21 @@ test('high-speed sweeps hit consecutive barriers in one step and only break the 
   assert.deepEqual(impacts, ['dash', 'break', 'crash']);
   assert.equal(run.crash.z, 4.5);
   assert.ok(Math.abs(run.distance - 3.82) < 1e-9);
+});
+
+test('a high-speed sweep breaks a barrier before a gap and stops before later contacts', () => {
+  const events = [];
+  const run = new Run({ scenario: 'landing', onEvent: (event) => events.push(event) });
+  run.baseSpeed = 572;
+  run.addClosure(2, 2, 0.5);
+  run.addObstacle(2.4, 2, 'barrier');
+  run.addObstacle(4.5, 2, 'barrier');
+  run.dash();
+  run.tick();
+  assert.deepEqual(events, ['dash', 'break', 'crash']);
+  assert.equal(run.distance, 2);
+  assert.equal(run.crash.type, 'gap');
+  assert.deepEqual(run.obstacles.map(({ z }) => z), [2, 4.5]);
 });
 
 test('dash and power slide add speed at 572 m/s and expire while base speed keeps rising', () => {
@@ -715,16 +1378,25 @@ function browserHarness(scenario, {
   let now = 0;
   let scene;
   let runner;
+  let death;
+  let soundtrack;
+  const updateSoundtrack = context.VoidAudio.Soundtrack.prototype.update;
+  context.VoidAudio.Soundtrack.prototype.update = function (state) {
+    soundtrack = this;
+    updateSoundtrack.call(this, state);
+  };
   const draw = context.VoidScene.prototype.draw;
-  context.VoidScene.prototype.draw = function (run, ...args) {
+  context.VoidScene.prototype.draw = function (run, time, dt, mode, clue, signal, presentation) {
     scene = this;
     runner = run;
-    draw.call(this, run, ...args);
+    death = presentation;
+    draw.call(this, run, time, dt, mode, clue, signal, presentation);
   };
-  return {
+  const page = {
     dom, ids, classes, Scene: context.VoidScene, draws: () => draws,
     paceStrokes: () => paceStrokes, speedStrokes: () => speedStrokes, dashStrokes: () => dashStrokes,
-    get scene() { return scene; }, get runner() { return runner; },
+    get scene() { return scene; }, get runner() { return runner; }, get soundtrack() { return soundtrack; },
+    get death() { return death; },
     key(type, code, repeat = false, options = {}) {
       let prevented = false;
       window.events[type]({ code, repeat, preventDefault: () => { prevented = true; }, ...options });
@@ -760,7 +1432,24 @@ function browserHarness(scenario, {
         now += 1000 / 60;
       }
     },
+    finishDeath() {
+      assert.equal(dom.body.dataset.mode, 'dying');
+      if (!ids['death-thought'].textContent) {
+        page.delayFrame(1600);
+        page.step(1);
+        assert.ok(ids['death-thought'].textContent);
+      }
+      if (ids['death-thought'].style.textShadow) {
+        page.delayFrame(200);
+        page.step(1);
+        assert.equal(ids['death-thought'].style.textShadow, '');
+      }
+      page.delayFrame(2300);
+      page.step(1);
+      assert.equal(dom.body.dataset.mode, 'ended');
+    },
   };
+  return page;
 }
 
 test('a native mobile start requests game fullscreen synchronously and manual exit keeps the run', async () => {
@@ -813,7 +1502,7 @@ test('a native mobile start requests game fullscreen synchronously and manual ex
   assert.equal(viewportRequests.length, 1);
 
   page.step(86);
-  assert.equal(page.dom.body.dataset.mode, 'ended');
+  page.finishDeath();
   tap('restart');
   assert.deepEqual(viewportRequests.at(-1), ['hide', 'ended']);
   page.step(1);
@@ -863,7 +1552,7 @@ test('legacy touch clicks use either WebKit fullscreen method and do not stack o
     page.dom.webkitCurrentFullScreenElement = root;
     page.resize(390, 790, { bottom: 34 }, 'webkitfullscreenchange');
     page.step(90);
-    assert.equal(page.dom.body.dataset.mode, 'ended');
+    page.finishDeath();
     page.click('restart', { sourceCapabilities: { firesTouchEvents: true } });
     assert.equal(page.dom.body.dataset.mode, 'running');
     assert.equal(requests, 1);
@@ -903,7 +1592,7 @@ test('standalone, an existing fullscreen, a denied request, and absent APIs all 
   page.click('start', { pointerType: 'touch' });
   page.step(90);
   await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(page.dom.body.dataset.mode, 'ended');
+  page.finishDeath();
   assert.equal(requests, 1);
   page.click('restart', { pointerType: 'touch' });
   assert.equal(page.dom.body.dataset.mode, 'running');
@@ -1069,7 +1758,8 @@ test('install visibility follows appinstalled, standalone, confirmed installs, a
   reload.windowEvent('beforeinstallprompt', { preventDefault() {}, prompt() { assert.fail('No prompt during play'); } });
   assert.equal(reload.ids.install.hidden, true);
   reload.step(90);
-  assert.equal(reload.dom.body.dataset.mode, 'ended');
+  assert.equal(reload.ids.install.hidden, true);
+  reload.finishDeath();
   assert.equal(reload.ids.install.hidden, true);
 });
 
@@ -1077,6 +1767,7 @@ test('keyboard uses S and Down for slides, requires a fresh press, and keeps Spa
   const game = browserHarness('landing');
   function stepToWindow() {
     for (let frame = 0; frame < 65 && !game.runner.slideWindowOpen; frame++) game.step(1);
+    assert.ok(game.runner.airborne && game.runner.verticalSpeed < 0 && game.runner.height <= 1);
     assert.equal(game.ids.feedback.textContent, 'Power slide now · ↓ / S');
   }
   game.step(1);
@@ -1118,15 +1809,132 @@ test('keyboard uses S and Down for slides, requires a fresh press, and keeps Spa
   assert.equal(game.paceStrokes(), paceStrokes);
 });
 
+test('the HUD shows the mint cue over a gap only when the projected landing reaches its far lip', () => {
+  const page = browserHarness('landing');
+  page.key('keydown', 'Enter');
+  page.key('keyup', 'Enter');
+  page.step(1);
+  const run = page.runner;
+  run.distance = 50;
+  run.airborne = true;
+  run.height = 0.9;
+  run.verticalSpeed = -8;
+  run.addClosure(40, 2, 15);
+  page.step(1);
+  assert.equal(run.slideWindowOpen, false);
+  assert.match(page.ids.feedback.textContent, /solid track/i);
+
+  const [gap] = run.obstacles;
+  gap.end = 52.5;
+  page.step(1);
+  assert.ok(run.airborne && run.distance < gap.end);
+  assert.equal(run.slideWindowOpen, true);
+  assert.equal(page.ids.feedback.textContent, 'Power slide now · ↓ / S');
+  page.key('keydown', 'KeyS');
+  assert.equal(run.queuedSlide, true);
+  assert.equal(run.boosting, false);
+  page.step(12);
+  assert.equal(run.crash, null);
+  assert.equal(run.boosting, true);
+});
+
+test('barrier and slide gate practice allow the new timing on keyboard and touch', () => {
+  for (const pace of ['', 'fast']) {
+    for (const touch of [false, true]) {
+      for (const scenario of ['barrier', 'slide-gate']) {
+        const page = browserHarness(scenario, { pace, touch });
+        page.click('start');
+        page.step(1);
+        const run = page.runner;
+        const [obstacle] = run.obstacles;
+        const stepUntil = (condition) => {
+          for (let frame = 0; frame < 180 && !run.crash && !condition(); frame++) page.step(1);
+          assert.ok(condition(), `${scenario} at ${run.distance} m (pace = ${pace}, touch = ${touch})`);
+        };
+        const action = (key, swipe) => {
+          if (touch) {
+            page.pointer('swipe-field', 'pointerdown', 1, 110, 180);
+            page.pointer('swipe-field', 'pointermove', 1, 110, 180 + swipe);
+            page.pointer('swipe-field', 'pointerup', 1, 110, 180 + swipe);
+          } else {
+            page.key('keydown', key);
+            page.key('keyup', key);
+          }
+        };
+
+        if (scenario === 'barrier') {
+          const height = obstacles.barrier.height;
+          const touchdown = (9.8 + Math.sqrt(9.8 ** 2 - 2 * 23 * height)) / 23;
+          const landings = [];
+          const onEvent = run.onEvent;
+          run.onEvent = (event, detail) => {
+            if (event === 'land') landings.push(run.height);
+            onEvent(event, detail);
+          };
+          stepUntil(() => (obstacle.z - run.distance) <=
+            (touchdown + STEP) * run.speed + 1.8 * touchdown * (touchdown + STEP) / 2);
+          action('Space', -45);
+          stepUntil(() => run.distance > obstacle.z + 2);
+          assert.deepEqual(landings, [height]);
+        } else {
+          const { approach, front, back } = slideGateBounds(obstacle);
+          const cue = touch ? 'Slide gate · Swipe down now' : 'Slide gate · ↓ / S now';
+          stepUntil(() => page.ids.feedback.textContent === 'Slide gate ahead');
+          assert.ok(run.distance < approach);
+          stepUntil(() => page.ids.feedback.textContent === cue);
+          assert.ok(run.distance >= approach && run.distance < approach + run.speed / 60 + 0.002);
+          action('ArrowDown', 45);
+          stepUntil(() => run.distance >= run.slideEndDistance);
+          assert.ok(run.distance < front && run.sliding);
+          assert.equal(page.ids.feedback.textContent, 'Stay low · Slide gate');
+          stepUntil(() => run.distance >= back);
+          assert.equal(run.sliding, false);
+        }
+        assert.equal(page.dom.body.dataset.mode, 'running');
+      }
+    }
+  }
+});
+
+test('the gate cue follows the same world boundary at very different speeds', () => {
+  for (const speed of [6, 572]) {
+    const page = browserHarness('slide-gate');
+    page.click('start');
+    page.step(1);
+    const run = page.runner;
+    const { approach, front } = slideGateBounds(run.obstacles[0]);
+    run.baseSpeed = run.speed = speed;
+    run.distance = approach - 12;
+    page.step(1);
+    assert.ok(run.distance < approach);
+    assert.equal(page.ids.feedback.textContent, 'Slide gate ahead');
+    run.distance = approach;
+    page.step(1);
+    assert.ok(run.distance >= approach && run.distance < front);
+    assert.equal(page.ids.feedback.textContent, 'Slide gate · ↓ / S now');
+  }
+});
+
 test('page wiring reports a collision, restarts with one button, and dashes with X', () => {
   const game = browserHarness('barrier');
+  game.step(1);
+  const soundtrack = game.soundtrack;
+  assert.equal(soundtrack.mode, 'ready');
   game.ids.start.events.click();
+  assert.equal(game.soundtrack, soundtrack);
+  assert.equal(soundtrack.mode, 'running');
   game.step(119);
-  assert.equal(game.dom.body.dataset.mode, 'ended');
+  assert.equal(game.classes['.results'].hidden, true);
+  assert.equal(game.soundtrack.mode, 'ended');
+  game.finishDeath();
+  assert.equal(game.soundtrack, soundtrack);
+  assert.equal(soundtrack.mode, 'ended');
   assert.equal(game.dom.activeElement, game.ids.restart);
   assert.equal(game.ids.impact.textContent, 'You hit a cracked barrier.');
   game.ids.restart.events.click();
   game.step(1);
+  assert.equal(game.soundtrack, soundtrack);
+  assert.equal(soundtrack.mode, 'running');
   assert.equal(game.ids.distance.textContent, '0000');
   game.step(50);
   game.key('keydown', 'ShiftLeft');
@@ -1140,13 +1948,13 @@ test('page wiring reports a collision, restarts with one button, and dashes with
   game.step(20);
   assert.equal(game.dom.body.dataset.dash, 'true');
   assert.equal(game.ids.feedback.textContent, 'Barrier broken');
-  assert.equal(game.ids['dash-status'].textContent, 'Dash active');
+  assert.equal(game.ids['dash-label'].textContent, 'Dash active');
   assert.ok(game.dashStrokes() > 0);
   game.step(80);
   assert.equal(game.dom.body.dataset.mode, 'running');
 });
 
-test('center and exterior closures expose deep walls and an empty deck before and after the far lip enters view', () => {
+test('center and exterior closures draw a red warning triangle, deep walls and an empty deck', () => {
   const { Scene } = browserHarness('gap-edge');
   let stars = 0;
   const ctx = { beginPath() {}, arc() { stars++; }, fill() {}, fillRect() {} };
@@ -1155,10 +1963,11 @@ test('center and exterior closures expose deep walls and an empty deck before an
   const flats = [];
   const boxes = [];
   const faces = [];
+  const lines = [];
   renderer.flat = (left, right, start, end, color) => flats.push({ left, right, start, end, color });
   renderer.box = (...args) => boxes.push(args);
   renderer.face = (points, color) => faces.push({ points, color });
-  renderer.line = () => {};
+  renderer.line = (points, color) => lines.push({ points, color });
 
   for (const scenario of ['gap', 'gap-edge']) {
     const run = new Run({ scenario });
@@ -1170,13 +1979,25 @@ test('center and exterior closures expose deep walls and an empty deck before an
     run.lane = gap.lane;
     for (const distance of [0, 180, gap.end - 23, gap.end + 1]) {
       run.distance = distance;
-      flats.length = boxes.length = faces.length = 0;
+      flats.length = boxes.length = faces.length = lines.length = 0;
       renderer.track(run, false);
       const entry = gap.z - distance;
       const resume = gap.end - distance;
       const touchesVoid = (x1, x2, start, end) => x1 < right && x2 > left && start < resume && end > entry;
       assert.ok(flats.every((flat) => !touchesVoid(flat.left, flat.right, flat.start, flat.end)));
       assert.ok(boxes.every(([x, , z, width, , depth]) => !touchesVoid(x - width / 2, x + width / 2, z - depth / 2, z + depth / 2)));
+      assert.ok([...flats, ...faces, ...lines].every(({ color }) => color !== '#ffe787'));
+      if (distance === 0) {
+        assert.ok(flats.some(({ color, end }) => color === '#ff4c59' && end === entry));
+        const triangle = faces.filter(({ color }) => color === '#ff4c59' || color === '#271420');
+        assert.deepEqual(triangle.map(({ color, points }) => [color, points.length]), [['#ff4c59', 3], ['#271420', 3]]);
+        const bar = faces.find(({ color }) => color === '#fff3ed');
+        const dot = flats.find(({ color }) => color === '#fff3ed');
+        assert.ok(dot.end < Math.min(...bar.points.map(([, , z]) => z)));
+        assert.ok([...triangle, bar].every(({ points }) => points.every(([x, y, z]) =>
+          x > left && x < right && y >= 0 && y < 0.05 && z < entry)));
+        assert.ok(dot.left > left && dot.right < right && dot.end < entry);
+      }
       const walls = faces.filter(({ points }) => points.some(([, y]) => y <= -2.15));
       assert.ok(walls.some(({ points }) => points.every(([x]) => x === right)));
       assert.equal(walls.some(({ points }) => points.every(([x]) => x === left)), gap.lane !== 0);
@@ -1189,9 +2010,30 @@ test('center and exterior closures expose deep walls and an empty deck before an
         if (gap.lane === 0) assert.ok(flats.some(({ left, start, end }) => left < -6.25 && start === resume && end > resume));
       }
     }
-    renderer.roadblock(middle, gap.z);
-    const [, , z, , , depth] = boxes.at(-1);
-    assert.equal(z - depth / 2, gap.z);
+  }
+
+  for (const [width, height, pace, reduceMotion] of [
+    [1440, 900, '', false], [1440, 900, 'fast', false], [390, 844, 'fast', true],
+  ]) {
+    const run = new Run({ scenario: 'gap-short', pace });
+    run.distance = 25;
+    Object.assign(renderer, { width, height, reduceMotion, insets: [0, 0, 0, 0], openingBlend: 0 });
+    renderer.reset(run.speed);
+    renderer.frameCamera(run);
+    const warningPoints = () => {
+      boxes.length = flats.length = faces.length = lines.length = 0;
+      renderer.track(run, false);
+      return faces.find(({ color }) => color === '#ff4c59').points
+        .map((point) => renderer.screenPoint(renderer.viewPoint(point)));
+    };
+    const points = warningPoints();
+    const [[, tipY], [baseLeft, baseY], [baseRight]] = points;
+    assert.ok(baseRight - baseLeft > 12 && baseY - tipY > 8);
+    if (reduceMotion) {
+      renderer.updateSpeed(run, 0.25, 'running');
+      renderer.frameCamera(run);
+      assert.deepEqual(warningPoints(), points);
+    }
   }
 
   boxes.length = flats.length = faces.length = 0;
@@ -1227,6 +2069,49 @@ test('long-spike guidance distinguishes warning, jump, air dash, and touchdown',
   assert.equal(game.ids.feedback.textContent, 'Power slide now · ↓ / S');
 });
 
+test('keyboard and touch guidance teach when to jump a short gap and where to land over a long gap', () => {
+  for (const touch of [false, true]) {
+    const advance = (page, distance) => {
+      for (let frame = 0; page.runner.distance < distance && frame < 180; frame++) page.step(1);
+      assert.ok(page.runner.distance >= distance);
+    };
+    const jump = (page) => {
+      if (touch) {
+        page.pointer('swipe-field', 'pointerdown', 1, 110, 180);
+        page.pointer('swipe-field', 'pointermove', 1, 110, 150);
+        page.pointer('swipe-field', 'pointerup', 1, 110, 150);
+      } else {
+        page.key('keydown', 'Space');
+        page.key('keyup', 'Space');
+      }
+    };
+
+    const short = browserHarness('gap-short', { touch });
+    short.ids.start.events.click();
+    short.step(1);
+    advance(short, 45);
+    assert.equal(short.ids.feedback.textContent, 'Short gap ahead');
+    advance(short, 59);
+    assert.equal(short.ids.feedback.textContent, touch ? 'Swipe up now · Short gap' : 'Jump now · Short gap');
+    jump(short);
+    advance(short, 94);
+    assert.equal(short.dom.body.dataset.mode, 'running');
+    assert.equal(short.runner.airborne, false);
+
+    const long = browserHarness('gap', { touch });
+    long.ids.start.events.click();
+    long.step(1);
+    advance(long, 59);
+    assert.equal(long.ids.feedback.textContent, touch ? 'Long gap · Swipe to solid track' : 'Long gap · Move to solid track');
+    jump(long);
+    advance(long, 67);
+    assert.equal(long.ids.feedback.textContent, touch ? 'Land on solid track · Swipe sideways' : 'Land on solid track · Move over');
+    for (let frame = 0; !long.runner.crash && frame < 90; frame++) long.step(1);
+    long.finishDeath();
+    assert.equal(long.ids.impact.textContent, 'You fell through a gap. Land on solid track.');
+  }
+});
+
 test('W keeps the blue edge effect and badge active late in the dash', () => {
   const game = browserHarness('landing');
   game.ids.start.events.click();
@@ -1234,12 +2119,12 @@ test('W keeps the blue edge effect and badge active late in the dash', () => {
   game.step(35);
   const strokes = game.dashStrokes();
   game.step(3);
-  assert.equal(game.ids['dash-status'].textContent, 'Dash active');
+  assert.equal(game.ids['dash-label'].textContent, 'Dash active');
   assert.ok(game.dashStrokes() > strokes);
   assert.equal(game.speedStrokes(), 0);
   assert.equal(game.paceStrokes(), 0);
   game.step(9);
-  assert.equal(game.ids['dash-status'].textContent, '');
+  assert.equal(game.ids['dash-label'].textContent, 'Dash recharging');
   assert.ok(game.paceStrokes() > 0);
   const finishedStrokes = game.dashStrokes();
   game.step(20);
@@ -1253,13 +2138,13 @@ test('reduced motion keeps a sustained dash badge and skips animated streaks', (
   game.ids.start.events.click();
   game.key('keydown', 'KeyX');
   game.step(38);
-  assert.equal(game.ids['dash-status'].textContent, 'Dash active');
+  assert.equal(game.ids['dash-label'].textContent, 'Dash active');
   assert.ok(Number(game.ids.speed.textContent) > START_SPEED);
   assert.equal(game.speedStrokes(), 0);
   assert.equal(game.paceStrokes(), 0);
   assert.equal(game.dashStrokes(), 0);
   game.step(9);
-  assert.equal(game.ids['dash-status'].textContent, '');
+  assert.equal(game.ids['dash-label'].textContent, 'Dash recharging');
 });
 
 test('page wiring moves only one lane per press, even during keyboard repeat', () => {
@@ -1270,7 +2155,7 @@ test('page wiring moves only one lane per press, even during keyboard repeat', (
   game.key('keydown', 'ArrowLeft', true);
   game.key('keydown', 'ArrowLeft');
   game.step(222);
-  assert.equal(game.dom.body.dataset.mode, 'ended');
+  game.finishDeath();
   assert.equal(game.ids.distance.textContent, '0103');
 
   game.key('keyup', 'ArrowLeft');
@@ -1350,6 +2235,7 @@ test('only a fresh downward swipe in the landing window earns a touch power slid
   }
   function stepToWindow() {
     for (let frame = 0; frame < 65 && !game.runner.slideWindowOpen; frame++) game.step(1);
+    assert.ok(game.runner.airborne && game.runner.verticalSpeed < 0 && game.runner.height <= 1);
     assert.equal(game.ids.feedback.textContent, 'Power slide now · Swipe down');
   }
   game.ids.start.events.click();
@@ -1400,7 +2286,7 @@ test('a second finger can dash independently, with immediate input and a live ch
   assert.notEqual(game.ids['touch-charge'].style.transform, 'scaleX(1.000)');
   game.step(43);
   assert.equal(game.ids['touch-dash-label'].textContent, 'Recharging');
-  game.step(16);
+  game.step(198);
   assert.equal(game.ids['touch-dash-label'].textContent, 'Ready');
   game.pointer(dash, 'pointerup', 2, 290, 340);
   game.pointer(dash, 'click', 2, 290, 340, { detail: 1 });
@@ -1473,12 +2359,17 @@ test('crash and touch restart clear contacts and restore the Dash control with a
   game.pointer(field, 'pointermove', 1, 110, 208);
   assert.equal(game.runner.sliding, true);
   game.step(95);
-  assert.equal(game.dom.body.dataset.mode, 'ended');
+  assert.equal(game.dom.body.dataset.mode, 'dying');
   assert.equal(game.ids[field].hidden, true);
   assert.equal(game.ids['touch-controls'].hidden, true);
   assert.equal(game.ids['touch-dash'].capture.size, 0);
   assert.equal(game.ids[field].capture.size, 0);
-  game.ids.restart.events.click();
+  const crashed = game.runner;
+  game.click('restart', { pointerType: 'touch' });
+  game.step(1);
+  assert.equal(game.runner, crashed);
+  game.finishDeath();
+  game.click('restart', { pointerType: 'touch' });
   game.step(1);
   assert.equal(game.ids['touch-controls'].hidden, false);
   assert.equal(game.ids['touch-dash-label'].textContent, 'Ready');
@@ -1490,6 +2381,26 @@ test('crash and touch restart clear contacts and restore the Dash control with a
   game.pointer(field, 'pointerdown', 3, 110, 180);
   game.pointer(field, 'pointermove', 3, 160, 180);
   assert.equal(game.runner.lane, 3);
+});
+
+test('reduced motion holds the shade and the death thought steady as soon as they appear', () => {
+  const game = browserHarness('hurdle', { reducedMotion: true });
+  game.click('start');
+  for (let frame = 0; frame < 100 && !game.death; frame++) game.step(1);
+  assert.equal(game.dom.body.dataset.mode, 'dying');
+  const shade = game.ids['death-shade'];
+  const thought = game.ids['death-thought'];
+  assert.equal(shade.hidden, true);
+  game.delayFrame(1200);
+  game.step(1);
+  assert.equal(shade.hidden, false);
+  assert.equal(shade.style.opacity, '1');
+  assert.equal(thought.textContent, '');
+  game.delayFrame(400);
+  game.step(1);
+  assert.equal(thought.textContent, 'One white dot.');
+  assert.equal(thought.style.textShadow, '');
+  game.finishDeath();
 });
 
 test('touch hazard guidance names the swipe and lets a second finger air dash over long spikes', () => {
@@ -1533,6 +2444,92 @@ test('compact camera keeps the near deck and all lane centers in portrait and sh
   }
 });
 
+test('endless launch and restart send the faster actual pace to the HUD, camera and soundtrack', () => {
+  const game = browserHarness('');
+  game.step(1);
+  const { scene } = game;
+  scene.reset(START_SPEED);
+  scene.frameCamera(game.runner);
+  const practiceFocal = scene.focal;
+
+  game.click('start');
+  game.step(1);
+  assert.equal(game.runner.speed, ENDLESS_START_SPEED);
+  assert.equal(Number(game.ids.speed.textContent), ENDLESS_START_SPEED);
+  assert.equal(game.soundtrack.speed, ENDLESS_START_SPEED);
+  assert.ok(scene.focal < practiceFocal);
+  const launchFocal = scene.focal;
+
+  game.step(105);
+  game.finishDeath();
+  assert.equal(game.runner.crash.type, 'hurdle');
+  assert.ok(game.soundtrack.speed > ENDLESS_START_SPEED);
+  game.click('restart');
+  game.step(1);
+  assert.equal(game.runner.distance, 0);
+  assert.equal(Number(game.ids.speed.textContent), ENDLESS_START_SPEED);
+  assert.equal(game.soundtrack.speed, ENDLESS_START_SPEED);
+  assert.equal(scene.focal, launchFocal);
+});
+
+test('authored practice URLs bypass saved clues and keep personal progress isolated', () => {
+  const key = SAVE_KEY + ':v2:checkpoint';
+  const saved = JSON.stringify({ version: 2, meters: 90_000, bolts: 5, discoveredClues: 4 });
+  const drills = [
+    ['jump-slide', '', START_SPEED, 1],
+    ['lane-jump', 'fast', FAST_START_SPEED, 1],
+    ['challenge', '', 144, 4],
+    ['challenge', 'fast', 176, 5],
+  ];
+  for (const [scenario, pace, speed, courseTier] of drills) {
+    const storage = new Map([[key, saved]]);
+    const page = browserHarness(scenario, { pace, storage });
+    page.click('start');
+    page.step(1);
+    assert.equal(page.runner.scripted, true);
+    assert.equal(page.runner.endless, scenario === 'challenge');
+    assert.equal(page.runner.speed, speed);
+    assert.equal(page.runner.courseTierFloor, courseTier);
+    assert.equal(page.runner.musicTierFloor, 1);
+    assert.ok(page.runner.obstacles.length > 2);
+    page.step(130);
+    assert.ok(page.runner.distance > page.runner.obstacles[0].z - 1);
+    assert.equal(page.runner.transmission, null);
+    page.windowEvent('pagehide');
+    assert.deepEqual([...storage], [[key, saved]]);
+  }
+});
+
+test('a discovered save widens the title camera and sends actual advanced speed on keyboard and touch start', () => {
+  const regular = browserHarness('');
+  regular.step(1);
+  const checkpointKey = SAVE_KEY + ':v2:checkpoint';
+  const checkpoint = { version: 2, meters: CLUES[0].meters + 135, bolts: 0, discoveredClues: 1 };
+  const storage = new Map([[checkpointKey, JSON.stringify(checkpoint)]]);
+  for (const touch of [false, true]) {
+    const game = browserHarness('', { storage, touch });
+    game.step(1);
+    assert.equal(game.dom.body.dataset.mode, 'ready');
+    assert.equal(game.runner.distance, 0);
+    assert.equal(game.runner.speed, ADVANCED_START_SPEED);
+    assert.equal(Number(game.ids.speed.textContent), ADVANCED_START_SPEED);
+    assert.equal(game.soundtrack.speed, ADVANCED_START_SPEED);
+    assert.ok(game.scene.focal < regular.scene.focal);
+    const titleFocal = game.scene.focal;
+
+    if (touch) game.click('start', { pointerType: 'touch' });
+    else game.key('keydown', 'Enter');
+    game.step(1);
+    assert.equal(game.dom.body.dataset.mode, 'running');
+    assert.equal(game.runner.distance, 0);
+    assert.equal(game.runner.speed, ADVANCED_START_SPEED);
+    assert.equal(Number(game.ids.speed.textContent), ADVANCED_START_SPEED);
+    assert.equal(game.soundtrack.speed, ADVANCED_START_SPEED);
+    assert.equal(game.scene.focal, titleFocal);
+    assert.deepEqual(JSON.parse(storage.get(checkpointKey)), checkpoint);
+  }
+});
+
 test('actual acceleration, dash, and power slide move the FOV smoothly and within bounds', () => {
   const { Scene } = browserHarness('camera');
   const view = Object.assign(Object.create(Scene.prototype), { reduceMotion: false, openingBlend: 0,
@@ -1566,12 +2563,13 @@ test('actual acceleration, dash, and power slide move the FOV smoothly and withi
   assert.ok(dash < at65 - baseline * 0.025);
   const afterDash = advance(1.6);
   assert.ok(Math.abs(afterDash - settledAt(run.speed)) < baseline * 0.004);
+  while (run.dashCharge < 1) advance(STEP);
 
   run.jump();
   while (!run.slideWindowOpen) advance(STEP);
   run.slide();
   while (!run.boosting) advance(STEP);
-  const boost = advance(0.24);
+  const boost = advance(0.31);
   assert.ok(boost < settledAt(run.baseSpeed) - baseline * 0.02);
   run.dash();
   const both = advance(0.22);
@@ -1755,7 +2753,7 @@ test('speed framing preserves readable outer lanes, and reduced motion and resta
   runner.x = 0;
   runner.baseSpeed = 572;
   game.step(5);
-  assert.equal(game.dom.body.dataset.mode, 'ended');
+  game.finishDeath();
   game.ids.restart.events.click();
   game.step(1);
   assert.equal(game.runner.speed, START_SPEED);
@@ -1970,7 +2968,10 @@ test('a delayed browser frame still sweeps a hurdle the runner reaches late in t
   game.runner.addObstacle(74, 2, 'hurdle');
   game.delayFrame(150);
   game.step(1);
-  assert.equal(game.dom.body.dataset.mode, 'ended');
+  assert.equal(game.dom.body.dataset.mode, 'dying');
+  assert.equal(game.death.elapsed, 0);
+  assert.equal(game.ids['death-shade'].hidden, true);
   assert.equal(game.runner.crash.type, 'hurdle');
   assert.ok(game.runner.distance > 73 && game.runner.distance < 74);
+  assert.equal(game.death.impact.impact.z, game.runner.distance);
 });

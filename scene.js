@@ -1,7 +1,12 @@
 (function () {
   'use strict';
 
-  const { LANE_WIDTH, LANE_COUNT, START_SPEED, MIN_VIEW_DISTANCE, SPIKE_HEIGHT, laneX, obstacles } = globalThis.VoidRunner;
+  const {
+    LANE_WIDTH, LANE_COUNT, START_SPEED, MIN_VIEW_DISTANCE, SPIKE_HEIGHT,
+    PLATFORM_HEIGHT, PLATFORM_HALF_WIDTH, SLIDE_GATE_CLEARANCE, SLIDE_GATE_HEIGHT, SLIDE_GATE_HALF_WIDTH,
+    BLACK_HOLE_HALF_WIDTH, movingBarrierX, laneX, obstacles,
+  } = globalThis.VoidRunner;
+  const { PULSE_LEAD } = globalThis.VoidEpisode;
   const ROAD_HALF = LANE_WIDTH * LANE_COUNT / 2;
   const TILE = 6;
   const FAR_TILES = 36;
@@ -11,6 +16,10 @@
   const PACE_LINES = 16;
   const OBSTACLE_VIEW_FRACTION = 0.9;
   const CUT_DEPTH = 2.15;
+  const SLIDE_BURST_TIME = 0.36;
+  const DASH_WAKE = 4.55;
+  const SLIDE_WAKE = 3.15;
+  const SHORT_WAKE = 1.2;
   const NEAR = 1.3;
   const PITCH = 0.207;
   const SIN = Math.sin(PITCH);
@@ -22,6 +31,69 @@
   const amber = ['#ffd18b', '#a65a3a', '#d58b53'];
   const pink = ['#e49aff', '#823c9c', '#a65ac1'];
   const railMount = ['#dec6fb', '#594373', '#3d2e55'];
+  const platformPalette = ['#465d79', '#294053', '#2d435d', '#9be1db'];
+  const gatePalette = ['#774252', '#653241', '#4d2c45', '#ffa48e'];
+
+  const deathPalettes = {
+    hurdle: ['#ffe1a8', '#ffad65', '#9b492d', '#472638'],
+    barrier: ['#f7d1ff', '#de92fc', '#8740a7', '#3b204e'],
+    movingBarrier: ['#c2f6ff', '#6ddaff', '#3c7db7', '#263659'],
+    slideGate: ['#ffe1cb', '#ff998b', '#a84c61', '#50283f'],
+    spikes: ['#ffc4cb', '#ff5a78', '#9f324f', '#4d192f'],
+    gap: ['#e4daff', '#ad92f9', '#63549c', '#292544'],
+    platform: ['#c7fff1', '#77e7d3', '#377e80', '#203846'],
+  };
+  // Separate suit plates leave a recognizable helmet, core and boots as the seams open.
+  const deathArmor = [
+    [[-.34, 1.48], [-.34, 1.91], [-.25, 2.07], [.25, 2.07], [.34, 1.91], [.34, 1.48]],
+    [[-.46, 1.39], [.14, 1.40], [.06, 1.08], [-.14, .99], [-.06, .89], [-.39, .78], [-.46, .99]],
+    [[.14, 1.40], [.46, 1.39], [.46, .83], [.21, .66], [-.34, .66], [-.39, .78],
+      [-.06, .89], [-.14, .99], [.06, 1.08]],
+    [[-.77, 1.29], [-.50, 1.38], [-.48, 1.17], [-.54, .76], [-.76, .68], [-.83, .85]],
+    [[.77, 1.29], [.50, 1.38], [.48, 1.17], [.54, .76], [.76, .68], [.83, .85]],
+    [[-.43, .65], [-.06, .65], [-.09, .22], [-.03, .02], [-.43, .02], [-.47, .22]],
+    [[.43, .65], [.06, .65], [.09, .22], [.03, .02], [.43, .02], [.47, .22]],
+  ];
+  const gateBands = [0, .47, .93, 1.40, 1.66, 2.08];
+  const reducedImpactPose = {
+    hurdle: .067, barrier: .14, movingBarrier: .18, slideGate: .12,
+    spikes: .20, gap: .35, platform: .18,
+  };
+
+  function clamp(value, low, high) {
+    return Math.min(high, Math.max(low, value));
+  }
+
+  function easeOut(value) {
+    return 1 - (1 - clamp(value, 0, 1)) ** 2;
+  }
+
+  function deathPose(type, time, direction) {
+    const strike = easeOut(time / .27);
+    const settle = easeOut(time / .78);
+    switch (type) {
+      case 'hurdle':
+        return { pitch: .24 + strike * 1.70 + settle * .64, roll: -.17 - settle * .55,
+          y: .10 + .57 * strike * (1 - settle * .50), depth: strike * .84 + settle * 1.72 };
+      case 'barrier':
+        return { pitch: -.10 - strike * .84, y: strike * .24, depth: -1.72 * settle };
+      case 'movingBarrier':
+        return { pitch: -.13 - strike * .51, roll: -direction * (.12 + .96 * strike),
+          x: direction * (1.93 * settle), y: strike * .30, depth: -.83 * settle };
+      case 'spikes':
+        return { pitch: .30 + easeOut(time / .42) * 2.66, roll: .25 + settle * .60,
+          y: 2.25 * settle, depth: .83 * settle };
+      case 'gap':
+        return { pitch: .19 + strike * .44, roll: -.13 - .27 * settle,
+          y: -.48 * settle - 2.43 * (time / 1.05) ** 2, depth: 5.6 * settle,
+          size: 1 - .75 * settle };
+      case 'platform':
+        return { pitch: -.16 - strike * .52, roll: -.10 - .31 * settle,
+          y: .43 * strike * (1 - settle * .73), depth: -1.24 * settle };
+      default:
+        return { depth: -1.02 * settle };
+    }
+  }
 
   function repeatable(index) {
     const value = Math.sin(index * 19.829 + 4.51) * 43758.5453;
@@ -41,25 +113,67 @@
     return Math.max(1, 2 ** Math.ceil(Math.log2(distance / (spacing * count))));
   }
 
-  function deckSurfaces(missing) {
-    if (missing < 0) return [[-ROAD_HALF, ROAD_HALF]];
-    const x = laneX(missing);
-    return [[-ROAD_HALF, x - LANE_WIDTH / 2], [x + LANE_WIDTH / 2, ROAD_HALF]];
+  function laneMissing(mask, lane) {
+    return (mask & (1 << lane)) !== 0;
   }
 
-  function clip(points) {
+  function gapLaneMask(gap) {
+    return ((1 << (gap.lanes ?? 1)) - 1) << gap.lane;
+  }
+
+  function deckSpans(near, far, gaps) {
+    const cuts = gaps.filter(({ z, end }) => z < far && end > near);
+    if (cuts.length === 0) return [{ start: near, end: far, mask: 0 }];
+    const boundaries = new Set([near, far]);
+    for (const { z, end } of cuts) {
+      boundaries.add(Math.max(near, z));
+      boundaries.add(Math.min(far, end));
+    }
+    const edges = [...boundaries].sort((a, b) => b - a);
+    const spans = [];
+    for (let index = 1; index < edges.length; index++) {
+      const start = edges[index];
+      const end = edges[index - 1];
+      let mask = 0;
+      for (const cut of cuts) {
+        if (cut.z < end && cut.end > start) mask |= gapLaneMask(cut);
+      }
+      spans.push({ start, end, mask });
+    }
+    return spans;
+  }
+
+  function deckSurfaces(mask) {
+    const surfaces = [];
+    let first = 0;
+    for (let lane = 0; lane <= LANE_COUNT; lane++) {
+      if (lane < LANE_COUNT && !laneMissing(mask, lane)) continue;
+      if (first < lane) surfaces.push([first * LANE_WIDTH - ROAD_HALF, lane * LANE_WIDTH - ROAD_HALF]);
+      first = lane + 1;
+    }
+    return surfaces;
+  }
+
+  function clip(points, boundary = NEAR, axis = 2, side = 1) {
     const visible = [];
     for (let index = 0; index < points.length; index++) {
       const point = points[index];
       const next = points[(index + 1) % points.length];
-      if (point[2] >= NEAR) visible.push(point);
-      if ((point[2] >= NEAR) !== (next[2] >= NEAR)) {
-        const mix = (NEAR - point[2]) / (next[2] - point[2]);
-        visible.push([point[0] + (next[0] - point[0]) * mix, point[1] + (next[1] - point[1]) * mix, NEAR]);
+      const inside = (point[axis] - boundary) * side >= 0;
+      if (inside) visible.push(point);
+      if (inside !== ((next[axis] - boundary) * side >= 0)) {
+        const mix = (boundary - point[axis]) / (next[axis] - point[axis]);
+        const intersection = point.map((value, dimension) => value + (next[dimension] - value) * mix);
+        intersection[axis] = boundary;
+        visible.push(intersection);
       }
     }
     return visible;
   }
+
+  const deathPlates = deathArmor.map((plate) => plate.map(([x, y]) => [x, y, 0]));
+  const slicedPlates = deathPlates.map((plate) => gateBands.slice(1).map((end, band) =>
+    clip(clip(plate, gateBands[band] + .015, 1), end - .015, 1, -1)));
 
   class Scene {
     constructor(canvas) {
@@ -114,6 +228,7 @@
 
     reset(speed = START_SPEED) {
       this.particles.length = 0;
+      this.slideBurst = null;
       this.speedPulse = 0;
       this.speedTravel = 0;
       this.boostRush = 0;
@@ -127,18 +242,22 @@
     }
 
     scatter(kind, run, obstacle) {
-      if (this.reduceMotion) return;
-      const impact = kind === 'break' || kind === 'crash';
+      if (this.reduceMotion || kind === 'crash') return;
+      if (kind === 'boost') {
+        this.particles = this.particles.filter((particle) => particle.landedAt !== run.time);
+        this.slideBurst = { x: run.x, y: run.height, z: run.distance, time: run.time };
+        return;
+      }
+      const impact = kind === 'break';
       const x = impact ? obstacle.impact.x : run.x;
-      const z = impact ? obstacle.impact.z : run.distance + 1;
-      const y = impact ? obstacle.impact.y : 0;
-      const color = kind === 'boost' ? '#98ffe3' : kind === 'land' ? '#ac89eb' :
-        obstacle.type === 'spikes' ? '#ff788e' : obstacle.type === 'roadblock' ? '#ffe787' : '#ec9dff';
-      const count = impact ? 28 : kind === 'boost' ? 18 : 8;
+      const z = impact ? obstacle.impact.z : run.distance;
+      const y = impact ? obstacle.impact.y : run.height;
+      const color = impact ? '#ec9dff' : '#ac89eb';
+      const count = impact ? 28 : 8;
       for (let index = 0; index < count; index++) {
         this.particles.push({
           x: x + (Math.random() - 0.5) * 1.35,
-          y: impact ? y + 0.12 + Math.random() * (kind === 'break' ? 1.15 : 0.55) : 0.1,
+          y: y + (impact ? 0.12 + Math.random() * 1.15 : 0.1),
           z: z + (Math.random() - 0.5) * 0.7,
           vx: (Math.random() - 0.5) * 8,
           vy: 0.6 + Math.random() * 4,
@@ -146,6 +265,7 @@
           size: 0.035 + Math.random() * 0.09,
           life: 0.38 + Math.random() * 0.42,
           color,
+          landedAt: impact ? undefined : run.time,
         });
       }
     }
@@ -218,71 +338,115 @@
       ctx.stroke();
     }
 
-    sky(time) {
+    sky(time, latestClue, signal) {
       const { ctx, width, height, centerX, horizon } = this;
+      const travel = this.reduceMotion ? 0 : this.speedTravel;
+      const drift = this.reduceMotion ? 0 : this.cameraX;
+      const tide = Math.sin(time * 0.16 + travel * 0.024);
       const backdrop = ctx.createLinearGradient(0, 0, 0, height);
-      backdrop.addColorStop(0, '#0c0a1b');
-      backdrop.addColorStop(0.32, '#100e24');
-      backdrop.addColorStop(0.56, '#050b17');
-      backdrop.addColorStop(1, '#02050d');
+      backdrop.addColorStop(0, '#020209');
+      backdrop.addColorStop(0.34, '#060612');
+      backdrop.addColorStop(0.59, '#03050e');
+      backdrop.addColorStop(1, '#010207');
       ctx.fillStyle = backdrop;
       ctx.fillRect(0, 0, width, height);
 
-      const moonX = centerX + width * 0.05;
-      const moonY = horizon - height * 0.105;
-      const radius = height * 0.19;
-      const haze = ctx.createRadialGradient(moonX, moonY, 0, moonX, moonY, width * 0.46);
-      haze.addColorStop(0, '#8252c74d');
-      haze.addColorStop(0.27, '#6736a939');
-      haze.addColorStop(1, '#4a237000');
+      const moonX = width * (0.48 + tide * 0.018) - drift * 1.3;
+      const moonY = horizon - height * (0.107 + Math.cos(time * 0.12) * 0.009);
+      const radius = Math.min(height * 0.19, width * 0.34);
+      const hazeRadius = Math.max(radius * 2.5, width * 0.41);
+      const haze = ctx.createRadialGradient(moonX, moonY, 0, moonX, moonY, hazeRadius);
+      haze.addColorStop(0, `rgba(73, 43, 117, ${0.34 + tide * 0.060})`);
+      haze.addColorStop(0.38, '#37205245');
+      haze.addColorStop(1, '#160d2b00');
       ctx.fillStyle = haze;
       ctx.fillRect(0, 0, width, height);
 
       for (const star of this.stars) {
-        const size = star.light > 0.95 ? 2 : 1;
-        ctx.fillStyle = `rgba(212,185,255,${0.13 + star.light * 0.47})`;
-        ctx.fillRect(star.x * width, star.y * height, size, size);
+        const depth = 0.19 + star.light * 0.81;
+        const x = (star.x - travel * depth * 0.0009 - drift * depth * 0.002) % 1;
+        const y = star.y * height + Math.sin(time * 0.17 + star.x * 10) * depth * 3;
+        const size = 0.7 + star.light ** 4 * 0.9;
+        ctx.fillStyle = `rgba(171, 172, 215, ${0.11 + star.light * 0.42})`;
+        ctx.fillRect((x < 0 ? x + 1 : x) * width, y, size, size);
       }
 
       const eclipse = ctx.createLinearGradient(0, moonY - radius, 0, moonY + radius);
-      eclipse.addColorStop(0, '#170e2b');
-      eclipse.addColorStop(1, '#35185132');
+      eclipse.addColorStop(0, '#070613');
+      eclipse.addColorStop(1, '#100c1d');
       ctx.beginPath();
       ctx.arc(moonX, moonY, radius, 0, Math.PI * 2);
       ctx.fillStyle = eclipse;
       ctx.fill();
-      ctx.strokeStyle = '#a978f36a';
-      ctx.lineWidth = 1.2;
+      ctx.strokeStyle = '#5b3c846d';
+      ctx.lineWidth = 1;
       ctx.stroke();
 
+      const arcDrift = Math.sin(time * 0.13 + travel * 0.035) * 0.15;
       for (let ring = 0; ring < 3; ring++) {
         ctx.beginPath();
-        ctx.arc(moonX, moonY, radius + 7 + ring * 12, Math.PI * (0.9 + ring * .17), Math.PI * (1.48 + ring * .25));
-        ctx.strokeStyle = ['#bf93ff5e', '#b488ec30', '#b488ec23'][ring];
+        ctx.arc(moonX, moonY, radius + 6 + ring * 9,
+          Math.PI * (0.88 + ring * 0.14 + arcDrift), Math.PI * (1.47 + ring * 0.18 + arcDrift));
+        ctx.strokeStyle = ['#9a6ddb58', '#966cc132', '#7951b027'][ring];
         ctx.lineWidth = 1;
         ctx.stroke();
       }
 
-      const depthHaze = ctx.createLinearGradient(0, horizon - height * 0.10, 0, horizon + height * 0.12);
-      depthHaze.addColorStop(0, '#030b1800');
-      depthHaze.addColorStop(1, '#030a17d6');
+      const depthHaze = ctx.createLinearGradient(0, horizon - height * 0.19, 0, horizon + height * 0.16);
+      depthHaze.addColorStop(0, '#07051a00');
+      depthHaze.addColorStop(0.58, '#0b142795');
+      depthHaze.addColorStop(1, '#02050de8');
       ctx.fillStyle = depthHaze;
       ctx.fillRect(0, 0, width, height);
 
-      for (let i = 0; i < 30; i++) {
+      for (let i = 0; i < 24; i++) {
         const side = i % 2 ? 1 : -1;
-        const x = centerX + side * width * (0.11 + repeatable(i + 37) * 0.45);
-        const y = horizon + height * (repeatable(i + 173) * .53 - .09);
-        const size = 1.5 + repeatable(i + 67) * 10;
+        const depth = repeatable(i + 37);
+        const offset = Math.sin(time * 0.22 + travel * 0.074 + i) * (4 + depth * 11);
+        const x = centerX + side * width * (0.12 + depth * 0.45) + offset - drift * depth * 5;
+        const y = horizon + height * (repeatable(i + 173) * 0.45 - 0.07);
+        const size = 1.3 + depth * 9;
         ctx.save();
-        ctx.translate(x, y + Math.sin(time * 0.45 + i) * size * 0.25);
+        ctx.translate(x, y + Math.sin(time * 0.27 + travel * 0.057 + i) * size * 0.3);
         ctx.rotate(0.2 + repeatable(i + 89) * 1.6);
-        ctx.fillStyle = '#28334d';
+        ctx.fillStyle = '#141b31';
         ctx.fillRect(-size / 2, -size / 2, size, size);
-        ctx.fillStyle = '#8b9cdf62';
+        ctx.fillStyle = '#7182b750';
         ctx.fillRect(-size / 2, -size / 2, size, 1);
         ctx.restore();
       }
+      this.relayNine(time, latestClue, signal);
+    }
+
+    relayNine(time, latestClue, signal) {
+      const { ctx, width, height } = this;
+      const [left, top, right, bottom] = this.insets;
+      const x = left + (width - left - right) * (width < 690 ? 0.83 : 0.77);
+      const y = top + (height - top - bottom) * 0.23;
+      const clueNumber = signal?.clueNumber ?? latestClue;
+      const clock = signal?.elapsed ?? time;
+      const phase = signal ? Math.min(1, clock / PULSE_LEAD) : 1;
+      const wave = this.reduceMotion ? 0.65 : 0.5 + 0.5 * Math.sin(clock * 1.3);
+      const pulse = clueNumber * (0.78 + 0.22 * wave) * (this.reduceMotion ? 1 : phase * phase * (3 - 2 * phase));
+      const radius = 11 + 7 * pulse;
+      const glow = ctx.createRadialGradient(x, y, 0, x, y, radius);
+      glow.addColorStop(0, `rgba(215, 235, 255, ${0.59 + 0.085 * pulse})`);
+      glow.addColorStop(0.38, '#728de647');
+      glow.addColorStop(1, '#dbe8ff00');
+      ctx.fillStyle = glow;
+      ctx.fillRect(x - radius, y - radius, radius * 2, radius * 2);
+
+      ctx.fillStyle = '#b8d6ff8c';
+      ctx.fillRect(x - radius * 0.55, y - 0.5, radius * 1.1, 1);
+      ctx.fillStyle = '#fff';
+      ctx.beginPath();
+      const point = 4 + pulse;
+      ctx.moveTo(x, y - point);
+      ctx.lineTo(x + point / 2, y);
+      ctx.lineTo(x, y + point);
+      ctx.lineTo(x - point / 2, y);
+      ctx.closePath();
+      ctx.fill();
     }
 
     deepVoid(distance) {
@@ -356,23 +520,61 @@
       if (blend > 0) this.trackMarks(distance, gaps, nearStart, farEnd, markStride * 2, blend);
       if (!this.reduceMotion) this.railReflectors(run, gaps, nearStart, farEnd);
 
-      for (const gap of gaps) {
-        const x = laneX(gap.lane);
-        const entry = gap.z - distance;
-        const resume = gap.end - distance;
-        if (entry >= -this.rearViewDistance && entry <= this.viewDistance) {
-          this.ctx.globalAlpha = Math.min(1, (210 - this.projectedDepth(entry)) / 130);
-          this.flat(x - 1.17, x + 1.17, entry - 0.8, entry, '#dfb557', 0.034);
-        }
-        if (resume >= -this.rearViewDistance && resume + 1.52 <= this.viewDistance) {
+      for (let lane = 0; lane < LANE_COUNT; lane++) {
+        const cuts = gaps.filter((gap) => laneMissing(gapLaneMask(gap), lane));
+        if (cuts.length === 0) continue;
+        const x = laneX(lane);
+        for (const { start, end, mask } of deckSpans(nearStart, farEnd, cuts)) {
+          if (mask !== 0) continue;
+          if (end < farEnd) this.gapWarning(x, end - distance, start - distance);
+          if (start === nearStart) continue;
+          const resume = start - distance;
+          const far = end - distance;
           this.ctx.globalAlpha = Math.max(0.48, Math.min(1, (210 - this.projectedDepth(resume)) / 130));
-          this.flat(x - 1.19, x + 1.19, resume, resume + 0.58, '#59a3ab', 0.034);
+          this.flat(x - 1.19, x + 1.19, resume, Math.min(far, resume + 0.58), '#59a3ab', 0.034);
+          if (far <= resume + 0.62) continue;
           for (const offset of [-0.78, 0, 0.78]) {
-            this.flat(x + offset - 0.20, x + offset + 0.20, resume + 0.62, resume + 1.52, '#99edf0', 0.034);
+            this.flat(x + offset - 0.20, x + offset + 0.20, resume + 0.62,
+              Math.min(far, resume + 1.52), '#99edf0', 0.034);
           }
         }
       }
       this.ctx.globalAlpha = 1;
+    }
+
+    gapWarning(x, entry, start) {
+      const scale = this.longitudinalScale;
+      const depth = this.projectedDepth(entry);
+      const paint = 0.034;
+      const red = '#ff4c59';
+      this.ctx.globalAlpha = Math.max(0.72, Math.min(1, (210 - depth) / 130));
+      this.flat(x - 1.17, x + 1.17, Math.max(entry - 0.65 / scale, start), entry, red, paint);
+
+      const tip = entry - 1.65 / scale;
+      // Stretch the paint in depth as it recedes to offset the shallow view of the deck.
+      const length = Math.max(3.8, (depth + this.cameraBack) * 0.27) / scale;
+      const at = (fraction) => tip - length * fraction;
+      const paintFace = (points, color) => {
+        const visible = clip(points, start);
+        if (visible.length >= 3) this.face(visible, color);
+      };
+      paintFace([[x, paint, tip], [x - 1.11, paint, at(1)], [x + 1.11, paint, at(1)]], red);
+      paintFace([[x, paint, at(0.20)], [x - 0.80, paint, at(0.88)], [x + 0.80, paint, at(0.88)]], '#271420');
+      paintFace([[x - 0.15, paint, at(0.40)], [x + 0.15, paint, at(0.40)],
+        [x + 0.10, paint, at(0.65)], [x - 0.10, paint, at(0.65)]], '#fff3ed');
+      if (at(0.73) > start) this.flat(x - 0.115, x + 0.115, Math.max(start, at(0.83)), at(0.73), '#fff3ed', paint);
+    }
+
+    boosterMarking(x, entry) {
+      this.ctx.globalAlpha = Math.min(1, (210 - this.projectedDepth(entry)) / 130);
+      const stripe = 0.8 / this.longitudinalScale;
+      this.flat(x - 1.17, x + 1.17, Math.max(entry - stripe, -this.rearViewDistance), entry, '#ffe787', 0.034);
+      for (const offset of [2.8, 5]) {
+        const tip = entry - offset / this.longitudinalScale;
+        const base = tip - 1.4 / this.longitudinalScale;
+        if (base < -this.rearViewDistance) continue;
+        this.line([[x - 0.98, 0.034, base], [x, 0.034, tip], [x + 0.98, 0.034, base]], '#ffe787', 2.6);
+      }
     }
 
     railReflectors(run, gaps, nearStart, farEnd) {
@@ -387,8 +589,8 @@
       const last = Math.floor(Math.min(farEnd, distance + 57 / scale) / stride);
       const halfDepth = 0.46 / scale;
       const trailLength = (0.45 + 6 * this.pace ** 2) / scale;
-      const leftCuts = gaps.filter((gap) => gap.lane === 0);
-      const rightCuts = gaps.filter((gap) => gap.lane === LANE_COUNT - 1);
+      const leftCuts = gaps.filter((gap) => laneMissing(gapLaneMask(gap), 0));
+      const rightCuts = gaps.filter((gap) => laneMissing(gapLaneMask(gap), LANE_COUNT - 1));
       for (let index = last; index >= first; index--) {
         const anchor = index * stride;
         const z = anchor - distance;
@@ -418,26 +620,22 @@
 
     trackTile(distance, gaps, selected, start, end) {
       const near = start - distance;
-      const far = end - distance;
       const dust = Math.min(1, Math.max(0.22, (210 - this.projectedDepth(near)) / 145));
-      this.ctx.globalAlpha = dust;
-      // Work in world coordinates at the cut, irrespective of the section's level of detail.
-      const gap = gaps.find((obstacle) => obstacle.z < end && obstacle.end > start);
-      if (!gap) {
-        this.deckSection(near, far, selected, -1);
-        return;
+      // Compare against the open deck immediately beyond the tile's far edge.
+      let fartherMask = 0;
+      for (const gap of gaps) {
+        if (gap.z <= end && gap.end > end) fartherMask |= gapLaneMask(gap);
       }
-
-      const entry = Math.max(near, gap.z - distance);
-      const resume = Math.min(far, gap.end - distance);
-      this.deckSection(resume, far, selected, -1);
-      if (gap.end <= end) {
+      for (const span of deckSpans(start, end, gaps)) {
+        const opened = span.mask & ~fartherMask;
         this.ctx.globalAlpha = Math.max(0.48, dust);
-        this.cutLip(laneX(gap.lane), resume);
+        for (let lane = 0; opened && lane < LANE_COUNT; lane++) {
+          if (laneMissing(opened, lane)) this.cutLip(laneX(lane), span.end - distance);
+        }
         this.ctx.globalAlpha = dust;
+        this.deckSection(span.start - distance, span.end - distance, selected, span.mask);
+        fartherMask = span.mask;
       }
-      this.deckSection(entry, resume, selected, gap.lane);
-      this.deckSection(near, entry, selected, -1);
     }
 
     trackMarks(distance, gaps, start, end, stride, opacity) {
@@ -447,67 +645,75 @@
       for (let tile = last; tile >= first; tile--) {
         const z = tile * stride;
         const near = z - distance;
-        const gap = gaps.find((cut) => cut.z < z + stride && cut.end > z);
-        const missing = gap?.lane ?? -1;
         this.ctx.globalAlpha = opacity * Math.min(1, Math.max(0.22, (210 - this.projectedDepth(near)) / 145));
         if (z >= start) {
-          for (const [left, right] of deckSurfaces(missing)) {
-            if (left < right) this.flat(left, right, near, Math.min(end - distance, near + .09 * scale), '#130f20', .018);
+          for (const span of deckSpans(z, Math.min(end, z + 0.09 * scale), gaps)) {
+            for (const [left, right] of deckSurfaces(span.mask)) {
+              this.flat(left, right, span.start - distance, span.end - distance, '#130f20', 0.018);
+            }
           }
         }
-        const markerStart = Math.max(start - distance, near + 1.05 * scale);
-        const markerEnd = Math.min(end - distance, near + 2.1 * scale);
-        if (markerStart >= markerEnd) continue;
-        for (let lane = 1; lane < LANE_COUNT; lane++) {
-          if (lane === missing || lane - 1 === missing) continue;
-          const edge = -ROAD_HALF + lane * LANE_WIDTH;
-          this.flat(edge - 0.018, edge + 0.018, markerStart, markerEnd, '#9b77c7', 0.023);
+        const markerStart = Math.max(start, z + 1.05 * scale);
+        const markerEnd = Math.min(end, z + 2.1 * scale);
+        if (markerStart < markerEnd) {
+          for (const span of deckSpans(markerStart, markerEnd, gaps)) {
+            this.laneMarks(span.start - distance, span.end - distance, span.mask, true);
+          }
         }
-        for (const side of [-1, 1]) {
-          if (missing === (side < 0 ? 0 : LANE_COUNT - 1)) continue;
-          const edge = side * ROAD_HALF;
-          this.flat(edge - 0.064, edge + 0.064, markerStart, markerEnd, '#dfbcff', 0.037);
-        }
-        if (gap) {
-          const braceNear = Math.max(start - distance, gap.z - distance, near + 3.65 * scale);
-          const braceFar = Math.min(end - distance, gap.end - distance, near + 4.25 * scale);
-          if (braceFar <= braceNear) continue;
-          const left = laneX(missing) - LANE_WIDTH / 2;
-          const right = left + LANE_WIDTH;
-          if (missing > 0 && this.cameraX > left) this.cutBrace(left, braceNear, braceFar);
-          if (missing < LANE_COUNT - 1 && this.cameraX < right) this.cutBrace(right, braceNear, braceFar);
+        const braceNear = Math.max(start, z + 3.65 * scale);
+        const braceFar = Math.min(end, z + 4.25 * scale);
+        if (gaps.length === 0 || braceNear >= braceFar) continue;
+        for (const span of deckSpans(braceNear, braceFar, gaps)) {
+          for (let lane = 1; span.mask && lane < LANE_COUNT; lane++) {
+            const missingLeft = laneMissing(span.mask, lane - 1);
+            if (missingLeft === laneMissing(span.mask, lane)) continue;
+            const edge = -ROAD_HALF + lane * LANE_WIDTH;
+            if (missingLeft ? this.cameraX < edge : this.cameraX > edge) {
+              this.cutBrace(edge, span.start - distance, span.end - distance);
+            }
+          }
         }
       }
     }
 
-    deckSection(near, far, selected, missing) {
-      if (far <= near) return;
+    deckSection(near, far, selected, mask) {
       const half = LANE_WIDTH / 2;
-      const cut = laneX(missing);
-      if (missing > 0) this.cutWall(cut - half, near, far);
-      if (missing >= 0 && missing < LANE_COUNT - 1) this.cutWall(cut + half, near, far);
-      for (const [left, right] of deckSurfaces(missing)) {
-        if (right <= left) continue;
+      for (let lane = 1; mask && lane < LANE_COUNT; lane++) {
+        if (laneMissing(mask, lane - 1) !== laneMissing(mask, lane)) {
+          this.cutWall(-ROAD_HALF + lane * LANE_WIDTH, near, far);
+        }
+      }
+      for (const [left, right] of deckSurfaces(mask)) {
         this.flat(left, right, near, far, '#261b38');
       }
-      if (missing > 0) this.flat(cut - half - 0.16, cut - half, near, far, '#929ec1', 0.025);
-      if (missing >= 0 && missing < LANE_COUNT - 1) {
-        this.flat(cut + half, cut + half + 0.16, near, far, '#929ec1', 0.025);
-      }
-      if (selected >= 0 && selected !== missing) {
+      if (selected >= 0 && !laneMissing(mask, selected)) {
         const x = laneX(selected);
         this.flat(x - half + 0.045, x + half - 0.045, near, far, '#302248', 0.012);
       }
-      for (let lane = 1; lane < LANE_COUNT; lane++) {
-        if (lane === missing || lane - 1 === missing) continue;
+      for (let lane = 1; mask && lane < LANE_COUNT; lane++) {
+        const missingLeft = laneMissing(mask, lane - 1);
+        if (missingLeft === laneMissing(mask, lane)) continue;
         const edge = -ROAD_HALF + lane * LANE_WIDTH;
-        this.flat(edge - 0.025, edge + 0.025, near, far, '#61477d', 0.019);
+        this.flat(edge - (missingLeft ? 0 : 0.16), edge + (missingLeft ? 0.16 : 0), near, far, '#929ec1', 0.025);
+      }
+      this.laneMarks(near, far, mask, false);
+    }
+
+    laneMarks(near, far, mask, ticks) {
+      for (let lane = 1; lane < LANE_COUNT; lane++) {
+        if (laneMissing(mask, lane) || laneMissing(mask, lane - 1)) continue;
+        const edge = -ROAD_HALF + lane * LANE_WIDTH;
+        if (ticks) this.flat(edge - 0.018, edge + 0.018, near, far, '#9b77c7', 0.023);
+        else this.flat(edge - 0.025, edge + 0.025, near, far, '#61477d', 0.019);
       }
       for (const side of [-1, 1]) {
-        if (missing === (side < 0 ? 0 : LANE_COUNT - 1)) continue;
+        if (laneMissing(mask, side < 0 ? 0 : LANE_COUNT - 1)) continue;
         const edge = side * ROAD_HALF;
-        this.flat(edge - 0.20, edge + 0.20, near, far, '#583888', 0.025);
-        this.flat(edge - 0.037, edge + 0.037, near, far, '#a77cf9', 0.032);
+        if (ticks) this.flat(edge - 0.064, edge + 0.064, near, far, '#dfbcff', 0.037);
+        else {
+          this.flat(edge - 0.20, edge + 0.20, near, far, '#583888', 0.025);
+          this.flat(edge - 0.037, edge + 0.037, near, far, '#a77cf9', 0.032);
+        }
       }
     }
 
@@ -538,9 +744,10 @@
     }
 
     hurdle(x, z) {
-      this.box(x, 0, z, 1.92, 0.17, 0.47, ['#7b5271', '#44314d', '#987182']);
-      this.box(x, 0.17, z, 1.92, 0.54, 0.5, amber);
-      const front = z - 0.252;
+      const { height, halfWidth, halfDepth } = obstacles.hurdle;
+      this.box(x, 0, z, halfWidth * 2, 0.17, 0.47, ['#7b5271', '#44314d', '#987182']);
+      this.box(x, 0.17, z, halfWidth * 2, height - 0.17, halfDepth * 2, amber);
+      const front = z - halfDepth - 0.002;
       const dashes = [-0.61, -0.13, 0.35];
       for (const dash of dashes) {
         this.face([[x + dash, .25, front], [x + dash + .19, .25, front],
@@ -550,41 +757,196 @@
     }
 
     barrier(x, z) {
-      const front = z - 0.323;
-      this.box(x, 0, z, 1.98, 2.48, 0.64, pink);
-      this.face([[x - .82, .17, front], [x + .81, .17, front], [x + .81, 2.31, front],
-        [x - .54, 2.31, front], [x - .82, 2.03, front]], '#532766');
-      this.line([[x - .86, .16, front], [x - .86, 2.03, front], [x - .54, 2.34, front],
-        [x + .83, 2.34, front], [x + .83, .15, front], [x - .86, .15, front]], '#e4a8f8', 1.3);
-      const crack = [[x + .35, 2.30, front], [x - .08, 1.75, front], [x + .17, 1.45, front],
-        [x - .29, 1.09, front], [x - .07, 0.86, front], [x - .44, 0.16, front]];
+      const { height, halfWidth, halfDepth } = obstacles.barrier;
+      const front = z - halfDepth - 0.003;
+      const point = (dx, fraction) => [x + dx, height * fraction, front];
+      this.box(x, 0, z, halfWidth * 2, height, halfDepth * 2, pink);
+      this.face([point(-.82, .07), point(.81, .07), point(.81, .93),
+        point(-.54, .93), point(-.82, .82)], '#532766');
+      this.line([point(-.86, .065), point(-.86, .82), point(-.54, .945),
+        point(.83, .945), point(.83, .06), point(-.86, .06)], '#e4a8f8', 1.3);
+      const crack = [point(.35, .93), point(-.08, .71), point(.17, .585),
+        point(-.29, .44), point(-.07, .35), point(-.44, .065)];
       this.line(crack, '#be5ede', 5.4);
       this.line(crack, '#f7c1ff', 2);
-      this.line([[x + .7, .73, front], [x + .42, 1.01, front], crack[3], [x - .55, 1.44, front]], '#ec9df8', 1.1);
+      this.line([point(.70, .295), point(.42, .41), crack[3], point(-.55, .58)], '#ec9df8', 1.1);
     }
 
-    roadblock(x, z) {
-      const { width, height, depth } = obstacles.roadblock;
-      this.box(x, 0, z + depth / 2, width, height, depth, ['#ffe687', '#695036', '#b98a44']);
-      const front = z - 0.003;
-      this.face([[x - 1.10, 0.24, front], [x + 1.10, 0.24, front], [x + 1.10, 1.96, front],
-        [x - 1.10, 1.96, front]], '#2c2433');
-      for (const offset of [-0.69, 0, 0.69]) {
-        this.face([[x + offset - 0.28, 0.82, front], [x + offset + 0.04, 0.82, front],
-          [x + offset + 0.30, 1.38, front], [x + offset - 0.02, 1.38, front]], '#ffda65');
+    platform(platform, distance, near, far) {
+      const { lane, height = PLATFORM_HEIGHT, z, end } = platform;
+      const x = laneX(lane);
+      const start = z - distance;
+      const finish = end - distance;
+      const left = x - PLATFORM_HALF_WIDTH;
+      const right = x + PLATFORM_HALF_WIDTH;
+      const [top, , , edge] = platformPalette;
+      this.structure(left, right, 0, height, near, far, near === start, platformPalette);
+      this.flat(left + 0.14, right - 0.14, near, far, '#3b506b', height + 0.012);
+      for (const rail of [left, right - 0.075]) {
+        this.flat(rail, rail + 0.075, near, far, edge, height + 0.018);
       }
-      this.line([[x - 1.11, 1.92, front], [x + 1.11, 1.92, front]], '#fff1af', 2.2);
-      this.line([[x - 1.11, 0.29, front], [x + 1.11, 0.29, front]], '#ffc752', 1.7);
+      const stride = TILE * levelOfDetail(this.viewDistance, TILE, 16);
+      const stripe = Math.min(stride * 0.15, 0.32 / this.longitudinalScale);
+      for (let mark = start + Math.max(1, Math.floor((near - start) / stride)) * stride; mark < far; mark += stride) {
+        if (mark + stripe <= near || mark + stripe >= finish) continue;
+        this.flat(left + 0.13, right - 0.13, Math.max(mark, near), Math.min(far, mark + stripe), top, height + 0.022);
+      }
+      for (const lip of [start, finish - stripe]) {
+        const edgeNear = Math.max(near, lip);
+        const edgeFar = Math.min(far, lip + stripe);
+        if (edgeNear < edgeFar) this.flat(left, right, edgeNear, edgeFar, edge, height + 0.024);
+      }
+      if (near !== start) return;
+      this.face([[left, height - 0.13, near], [right, height - 0.13, near],
+        [right, height, near], [left, height, near]], edge);
+      this.face([[left + 0.16, 0.15, near], [right - 0.16, 0.15, near],
+        [right - 0.32, height - 0.26, near], [left + 0.32, height - 0.26, near]], '#152635');
+    }
+
+    slideGate(gate, distance, near, far) {
+      const x = laneX(gate.lane);
+      const start = gate.z - distance;
+      const finish = gate.end - distance;
+      const left = x - SLIDE_GATE_HALF_WIDTH;
+      const right = x + SLIDE_GATE_HALF_WIDTH;
+      const bottom = SLIDE_GATE_CLEARANCE;
+      const top = SLIDE_GATE_HEIGHT;
+      const rim = '#ffa48e';
+      const foot = Math.min(0.44 / this.longitudinalScale, (finish - start) / 2);
+      for (const position of [start, finish - foot]) {
+        const postNear = Math.max(near, position);
+        const postFar = Math.min(far, position + foot);
+        if (postFar <= postNear) continue;
+        for (const edge of [left, right - 0.14]) {
+          this.structure(edge, edge + 0.14, 0, bottom, postNear, postFar, postNear === position, gatePalette);
+        }
+      }
+      this.structure(left, right, bottom, top, near, far, near === start, gatePalette);
+      for (const rail of [left, right - 0.10]) this.flat(rail, rail + 0.10, near, far, '#ac6779', top + 0.016);
+      if (near !== start) return;
+      this.face([[left, bottom, near], [right, bottom, near],
+        [right, bottom + 0.19, near], [left, bottom + 0.19, near]], rim);
+      this.face([[left + 0.14, bottom + 0.32, near], [right - 0.14, bottom + 0.32, near],
+        [right - 0.14, top - 0.22, near], [left + 0.14, top - 0.22, near]], '#291925');
+      for (const inset of [0.32, 0.76]) {
+        const y = bottom + inset;
+        this.face([[x - 0.60, y + 0.36, near], [x, y, near], [x + 0.60, y + 0.36, near],
+          [x + 0.60, y + 0.57, near], [x, y + 0.23, near], [x - 0.60, y + 0.57, near]], rim);
+      }
+    }
+
+    structure(left, right, bottom, top, near, far, cap, [topColor, frontColor, sideColor]) {
+      if (this.cameraX < left || this.cameraX > right) {
+        const edge = this.cameraX < left ? left : right;
+        this.face([[edge, bottom, near], [edge, bottom, far], [edge, top, far], [edge, top, near]], sideColor);
+      }
+      this.flat(left, right, near, far, topColor, this.cameraY > top ? top : bottom);
+      if (cap) {
+        this.face([[left, bottom, near], [right, bottom, near], [right, top, near], [left, top, near]], frontColor);
+      }
+    }
+
+    movingBarrier(obstacle, z, time) {
+      const x = movingBarrierX(obstacle, time);
+      const left = Math.min(laneX(obstacle.lane), laneX(obstacle.toLane));
+      const right = Math.max(laneX(obstacle.lane), laneX(obstacle.toLane));
+      const trackZ = z - 0.82 / this.longitudinalScale;
+      const depth = 0.22 / this.longitudinalScale;
+      this.flat(left - 0.39, right + 0.39, trackZ - depth, trackZ + depth, '#6671a6', 0.036);
+      for (const end of [left, right]) {
+        this.flat(end - 0.20, end + 0.20, trackZ - 2 * depth, trackZ + 2 * depth, '#adcdf6', 0.040);
+      }
+      this.barrier(x, z);
+      const direction = Math.sign(movingBarrierX(obstacle, time + 0.10) -
+        movingBarrierX(obstacle, Math.max(0, time - 0.10)));
+      if (direction) {
+        const tip = x + direction * 0.61;
+        const tail = x - direction * 0.57;
+        const step = tip - direction * 0.43;
+        this.face([[tip, 0.27, trackZ], [step, 0.53, trackZ], [step, 0.37, trackZ],
+          [tail, 0.37, trackZ], [tail, 0.17, trackZ], [step, 0.17, trackZ], [step, 0.01, trackZ]], '#b3ebff');
+      }
+    }
+
+    blackHole(obstacle, z, time) {
+      const x = laneX(obstacle.lane);
+      const { direction } = obstacle;
+      const point = this.viewPoint([x, 1.02, z]);
+      if (point[2] < NEAR) return;
+      const [cx, cy] = this.screenPoint(point);
+      const radius = Math.max(4.3, Math.min(72, this.focal / point[2] * BLACK_HOLE_HALF_WIDTH));
+      const { ctx } = this;
+      const edge = direction < 0 ? '#eca3ee' : '#8bdce6';
+      const shade = direction < 0 ? '#783969' : '#286176';
+      ctx.save();
+      if (obstacle.triggered) ctx.globalAlpha *= 0.48;
+      const glow = ctx.createRadialGradient(cx, cy, radius * 0.52, cx, cy, radius * 1.84);
+      glow.addColorStop(0, shade);
+      glow.addColorStop(1, '#01010700');
+      ctx.fillStyle = glow;
+      ctx.fillRect(cx - radius * 1.84, cy - radius * 1.84, radius * 3.68, radius * 3.68);
+      ctx.translate(cx, cy);
+      ctx.scale(radius, radius);
+      ctx.fillStyle = '#02030a';
+      ctx.beginPath();
+      ctx.arc(0, 0, 0.91, 0, 2 * Math.PI);
+      ctx.fill();
+      ctx.lineWidth = Math.max(0.095, 0.8 / radius);
+      ctx.strokeStyle = edge;
+      for (let ring = 0; ring < 2; ring++) {
+        ctx.beginPath();
+        const phase = Math.sin(time * 0.82) * 0.22 + ring * 0.46 + (direction < 0 ? Math.PI : 0);
+        ctx.ellipse(0, 0, 1 + ring * 0.28, 0.81 + ring * 0.20, -direction * 0.44,
+          phase + 0.42, phase + (ring ? 3.91 : 5.70));
+        ctx.stroke();
+      }
+      // The two chevrons stay readable while the accretion arcs drift.
+      for (const offset of [-0.27, 0.47]) {
+        const tip = direction * offset;
+        ctx.beginPath();
+        ctx.moveTo(tip - direction * 0.41, -0.38);
+        ctx.lineTo(tip, 0);
+        ctx.lineTo(tip - direction * 0.41, 0.38);
+        ctx.lineWidth = Math.max(0.135, 1.05 / radius);
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+
+    bolt(bolt, z) {
+      const point = this.viewPoint([laneX(bolt.lane), bolt.height, z]);
+      if (point[2] < NEAR) return;
+      const [x, y] = this.screenPoint(point);
+      const scale = Math.max(7.5, Math.min(60, this.focal / point[2] * 1.02));
+      const { ctx } = this;
+      const glow = ctx.createRadialGradient(x, y, 0, x, y, scale);
+      glow.addColorStop(0, '#49eef473');
+      glow.addColorStop(1, '#49eef400');
+      ctx.fillStyle = glow;
+      ctx.fillRect(x - scale, y - scale, scale * 2, scale * 2);
+      ctx.beginPath();
+      for (const [dx, dy] of [[0.09, -0.68], [-0.45, 0.11], [-0.05, 0.11], [-0.20, 0.67],
+        [0.46, -0.17], [0.06, -0.17], [0.26, -0.68]]) {
+        ctx.lineTo(x + dx * scale, y + dy * scale);
+      }
+      ctx.closePath();
+      ctx.lineWidth = Math.max(1, scale * 0.075);
+      ctx.strokeStyle = '#a2f9f2';
+      ctx.stroke();
+      ctx.fillStyle = '#ffd474';
+      ctx.fill();
     }
 
     spikes(patch, distance) {
       const left = laneX(patch.lane) - LANE_WIDTH / 2 + 0.1;
       const right = left + LANE_WIDTH * patch.lanes - 0.2;
       const limit = this.viewDistance * OBSTACLE_VIEW_FRACTION;
-      for (let tile = patch.tiles - 1; tile >= 0; tile--) {
+      const front = patch.z - distance;
+      const first = Math.max(0, Math.ceil((-this.rearViewDistance - front) / patch.tileLength) - 1);
+      const last = Math.min(patch.tiles - 1, Math.floor((limit - front) / patch.tileLength));
+      for (let tile = last; tile >= first; tile--) {
         const start = patch.z - distance + tile * patch.tileLength;
         const end = start + patch.tileLength;
-        if (end < -this.rearViewDistance || start > limit) continue;
         this.ctx.globalAlpha = Math.min(1, (195 - this.projectedDepth(start)) / 100);
         const nearEdge = Math.max(start, -this.rearViewDistance);
         const farEdge = Math.min(end, this.viewDistance);
@@ -610,41 +972,44 @@
       this.ctx.globalAlpha = 1;
     }
 
-    player(run, time, ready, dashing) {
+    player(run, time, ready, dashing, boosting) {
       const x = run.x;
       const lift = run.height;
       const sliding = run.sliding;
       const stride = this.reduceMotion || run.airborne || ready || sliding ? 0 : Math.sin(this.stridePhase);
       const bob = this.reduceMotion || run.airborne || sliding ? 0 : ready ? Math.sin(time * 1.9) * 0.035 : Math.abs(stride) * 0.055;
       const y = lift + bob;
-      const landingCue = run.slideWindowOpen || (run.boosting && !dashing);
-      const ring = landingCue ? '#9bffe6' : dashing ? '#90d9ff' : '#c0a0ff';
-      const signal = landingCue ? '#65ffd7' : dashing ? '#a6e1ff' : '#ab82fa';
-      const overCut = run.obstacles.some((obstacle) => obstacle.type === 'gap' &&
-        obstacle.z < run.distance + 0.59 && obstacle.end > run.distance - 0.75 &&
-        Math.abs(laneX(obstacle.lane) - x) < LANE_WIDTH / 2 + 0.87);
-      if (!overCut) {
-        this.flat(x - .67, x + .67, -.49, sliding ? .91 : .59, '#0e0a18a8', .032);
-        this.ctx.globalAlpha = landingCue || dashing ? 1 : 0.57;
-        this.line([[x - .65, .035, -.75], [x - .87, .035, -.35], [x - .87, .035, .38]], ring, 2);
-        this.line([[x + .65, .035, -.75], [x + .87, .035, -.35], [x + .87, .035, .38]], ring, 2);
+      const mint = run.slideWindowOpen || boosting;
+      const ring = mint ? '#9bffe6' : dashing ? '#90d9ff' : '#c0a0ff';
+      const signal = dashing ? '#a6e1ff' : mint ? '#65ffd7' : '#ab82fa';
+      const platform = run.obstacles.find((obstacle) => obstacle.type === 'platform' &&
+        obstacle.z < run.distance - 0.75 && obstacle.end > run.distance + (sliding ? 0.91 : 0.59) &&
+        Math.abs(laneX(obstacle.lane) - x) <= PLATFORM_HALF_WIDTH - 0.87 &&
+        lift >= (obstacle.height ?? PLATFORM_HEIGHT));
+      const overCut = run.obstacles.some((obstacle) => {
+        if (obstacle.type !== 'gap' || obstacle.z >= run.distance + 0.59 || obstacle.end <= run.distance - 0.75) {
+          return false;
+        }
+        const left = laneX(obstacle.lane) - LANE_WIDTH / 2;
+        const right = left + (obstacle.lanes ?? 1) * LANE_WIDTH;
+        return x > left - 0.87 && x < right + 0.87;
+      });
+      if (platform || !overCut) {
+        const floor = platform ? platform.height ?? PLATFORM_HEIGHT : 0;
+        this.flat(x - .67, x + .67, -.49, sliding ? .91 : .59, '#0e0a18a8', floor + .032);
+        this.ctx.globalAlpha = mint || dashing ? 1 : 0.57;
+        for (const side of [-1, 1]) {
+          this.line([[x + side * .65, floor + .035, -.75], [x + side * .87, floor + .035, -.35],
+            [x + side * .87, floor + .035, .38]], ring, 2);
+        }
         this.ctx.globalAlpha = 1;
       }
 
-      if (!this.reduceMotion && (dashing || run.boosting)) {
-        const trail = dashing ? '#56b6ffad' : '#6fffd37d';
-        const core = dashing ? '#cfedff' : '#b9ffea';
-        const length = dashing ? 6.1 : 4.1;
-        const anchor = sliding ? y - .51 : y;
-        for (const side of [-1, 1]) {
-          const end = [x + side * 1.15, y + .36, -length];
-          this.face([[x + side * .57, anchor + 1.24, 0], [x + side * .73, anchor + .92, 0], end], trail);
-          this.line([[x + side * .66, anchor + 1.09, 0], [x + side * .92, anchor + .71, -length * .65]], core, dashing ? 3.2 : 2.2);
-        }
-      }
+      if (dashing) this.dashExhaust(x, y, sliding);
+      if (boosting) this.slideExhaust(x, lift);
 
       if (sliding) {
-        this.slidePlayer(x, signal);
+        this.slidePlayer(x, y, signal);
         return;
       }
 
@@ -670,23 +1035,350 @@
       this.box(x, y + 1.65, -.349, .46, .042, .01, [signal, signal, signal]);
     }
 
-    slidePlayer(x, signal) {
+    dashExhaust(x, y, sliding) {
+      // Express wake lengths in camera depth so fast courses do not compress them into the suit.
+      const scale = this.longitudinalScale;
+      if (!this.reduceMotion) {
+        const silhouette = sliding ?
+          [[-.53, .04], [-.76, .29], [-.64, .62], [-.35, .72], [-.35, 1.24],
+            [.35, 1.24], [.35, .72], [.64, .62], [.76, .29], [.53, .04]] :
+          [[-.45, .04], [-.49, .69], [-.81, .82], [-.73, 1.36], [-.34, 1.48],
+            [-.34, 2.04], [.34, 2.04], [.34, 1.48], [.73, 1.36], [.81, .82], [.49, .69],
+            [.45, .04], [.13, .04], [0, .55], [-.13, .04]];
+        for (const [depth, color, edge] of [
+          [-4, '#164ba43d', '#4d9dff73'], [-2.55, '#307aea4d', '#8bd4ffa1'],
+        ]) {
+          const echo = silhouette.map(([dx, dy]) => [x + dx, y + dy, depth / scale]);
+          this.face(echo, color);
+          this.line([...echo, echo[0]], edge, 1.5);
+        }
+      }
+      const anchor = y + (sliding ? .58 : 1.16);
+      const length = this.reduceMotion ? SHORT_WAKE : DASH_WAKE;
+      for (const side of [-1, 1]) {
+        const at = (dx, dy, depth) => [x + side * dx, anchor + dy, depth / scale];
+        this.face([at(.56, .24, -.24), at(.92, .29, -.86), at(1.28, -.48, -length),
+          at(.83, -.22, -length * .65), at(.60, -.14, -.24)], '#2075ffaa');
+        this.face([at(.63, .16, -.29), at(.84, .17, -.65), at(1.16, -.38, -length * .91),
+          at(.72, -.08, -.36)], '#48baffee');
+        this.face([at(.68, .095, -.36), at(.79, .103, -.55), at(1.01, -.19, -length * .64),
+          at(.72, -.032, -.37)], '#e1f7ff');
+      }
+    }
+
+    slideExhaust(x, y) {
+      const rear = (this.reduceMotion ? SHORT_WAKE : SLIDE_WAKE) / this.longitudinalScale;
+      for (const side of [-1, 1]) {
+        const at = (dx, dy, z) => [x + side * dx, y + dy, z];
+        this.face([at(.38, .06, .44), at(.79, .065, .58), at(1.18, .15, -rear),
+          at(.58, .06, -rear * .73)], '#14c191a6');
+        this.face([at(.47, .085, .22), at(.71, .105, .35), at(1.08, .17, -rear * .91),
+          at(.63, .095, -rear * .64)], '#5affcce8');
+        this.face([at(.52, .10, .14), at(.62, .12, .26), at(.94, .18, -rear * .70),
+          at(.65, .12, -rear * .38)], '#d5ffee');
+      }
+    }
+
+    drawSlideBurst(z, time) {
+      const { x, y, time: started } = this.slideBurst;
+      const progress = Math.max(0, (time - started) / SLIDE_BURST_TIME);
+      const spread = 1 - (1 - progress) ** 2;
+      const opacity = (1 - progress) ** 1.45;
+      const radius = .78 + spread * 1.08;
+      const scale = this.longitudinalScale;
+      const arc = (angle, width) => Array.from({ length: 6 }, (_, index) => {
+        const theta = angle + width * index / 5;
+        return [x + Math.cos(theta) * radius, y + .055, z + Math.sin(theta) * radius * .70 / scale];
+      });
+      this.ctx.globalAlpha = opacity;
+      for (const angle of [-1.34, .24, 1.80, 3.38]) {
+        const points = arc(angle, 1.1);
+        this.line(points, '#2ae2a675', 7);
+        this.line(points, '#93ffdf', 2.4);
+      }
+      for (const side of [-1, 1]) {
+        for (let index = 0; index < 7; index++) {
+          const reach = .64 + repeatable(index * 4 + (side > 0 ? 751 : 797)) * 1.12;
+          const kick = repeatable(index * 3 + 811);
+          const dx = side * (.66 + reach * (.42 + spread));
+          const dy = .13 + kick * (.46 + 2.1 * progress) * (1 - progress);
+          const depth = (index % 3 - 1) * .38 - spread * (index / 6 + .32);
+          const tip = [x + dx, y + dy, z + depth / scale];
+          const tail = [x + dx - side * (.14 + .22 * kick), y + dy * .53,
+            z + (depth + .20 + kick * .19) / scale];
+          this.line([tail, tip], '#31ecb493', 4.3);
+          this.line([tail, tip], index % 3 === 0 ? '#e4fff5' : '#76ffce', 1.65);
+        }
+      }
+      this.ctx.globalAlpha = 1;
+    }
+
+    slidePlayer(x, y, signal) {
       for (const side of [-1, 1]) {
         const legX = x + side * .27;
         const reach = side > 0 ? .22 : 0;
-        this.box(legX, .03, .56 + reach, .43, .23, .69, violet);
-        this.box(legX, .19, .26 + reach, .40, .21, .68, suit);
+        this.box(legX, y + .03, .56 + reach, .43, .23, .69, violet);
+        this.box(legX, y + .19, .26 + reach, .40, .21, .68, suit);
       }
-      this.box(x, .25, -.20, .95, .49, .69, violet);
+      this.box(x, y + .25, -.20, .95, .49, .69, violet);
       for (const side of [-1, 1]) {
-        this.box(x + side * .59, .36, -.11, .30, .27, .51, suit);
-        this.box(x + side * .66, .33, .21, .33, .21, .28, steel);
+        this.box(x + side * .59, y + .36, -.11, .30, .27, .51, suit);
+        this.box(x + side * .66, y + .33, .21, .33, .21, .28, steel);
       }
-      this.box(x, .37, -.62, .53, .34, .21, suit);
-      this.box(x, .56, -.74, .30, .08, .026, [signal, signal, signal]);
-      this.box(x, .71, -.31, .68, .57, .65, steel);
-      this.box(x, .88, -.65, .56, .17, .035, ['#8966c3', '#221735', '#8463b3']);
-      this.box(x, .94, -.67, .46, .042, .01, [signal, signal, signal]);
+      this.box(x, y + .37, -.62, .53, .34, .21, suit);
+      this.box(x, y + .56, -.74, .30, .08, .026, [signal, signal, signal]);
+      this.box(x, y + .71, -.31, .68, .57, .65, steel);
+      this.box(x, y + .88, -.65, .56, .17, .035, ['#8966c3', '#221735', '#8463b3']);
+      this.box(x, y + .94, -.67, .46, .042, .01, [signal, signal, signal]);
+    }
+
+    deathPlayer(run, { impact: hazard, elapsed }) {
+      const { type, impact, impactTime = run.time } = hazard;
+      const palette = deathPalettes[type];
+      if (!palette || elapsed >= 1.05) return;
+      const { ctx, longitudinalScale: scale } = this;
+      const still = this.reduceMotion;
+      const time = still ? 0 : elapsed;
+      const poseTime = still ? reducedImpactPose[type] : time;
+      const fade = 1 - easeOut((elapsed - .46) / .59);
+      const z = impact.z - run.distance;
+      const velocity = type === 'movingBarrier' ?
+        (movingBarrierX(hazard, impactTime + .001) - movingBarrierX(hazard, impactTime - .001)) / .002 : 0;
+      const direction = Math.abs(velocity) > .03 ? Math.sign(velocity) : 0;
+      const { pitch = 0, roll = 0, x: shift = 0, y: lift = 0, depth = 0, size = 1 } =
+        deathPose(type, poseTime, direction);
+      const spread = easeOut(poseTime / .85);
+      const split = still ? .28 : .06 + easeOut((time - .10) / .68) * .94;
+      const halfHeight = run.sliding ? .62 : 1;
+      let x = impact.x + shift;
+      let bodyDepth = depth;
+      if (type === 'gap') {
+        const left = laneX(hazard.lane) - LANE_WIDTH / 2;
+        const right = left + LANE_WIDTH * (hazard.lanes ?? 1);
+        x += (clamp(x, left + .47, right - .47) - x) * spread;
+        bodyDepth = Math.min(depth, Math.max(0, (hazard.end - impact.z) * scale) * .82);
+      }
+      x = clamp(x, -ROAD_HALF + .27, ROAD_HALF - .27);
+      const sine = Math.sin(pitch);
+      const cosine = Math.cos(pitch);
+      const lean = Math.sin(roll);
+      const upright = Math.cos(roll);
+      const pivot = .96 * halfHeight;
+      const transform = ([px, py, pz], [dx, dy, dz]) => {
+        const height = (py * halfHeight - pivot) * size;
+        const thick = pz * size;
+        const rise = height * cosine - thick * sine;
+        const rollX = px * size * upright - rise * lean;
+        const rollY = px * size * lean + rise * upright;
+        const y = impact.y + lift + pivot * size + rollY + dy;
+        return [x + rollX + dx, type === 'gap' ? y : Math.max(.04, y),
+          z + (bodyDepth + thick * cosine + height * sine + dz) / scale];
+      };
+
+      ctx.save();
+      this.deathContact(run, hazard, z, time, fade, direction, palette);
+      const pieces = [];
+      const sliced = type === 'slideGate';
+      const thickness = type === 'barrier' || type === 'movingBarrier' ? .25 : .17;
+      const backFacing = cosine * COS + sine * SIN < 0;
+      const width = Math.max(1, this.width - this.insets[0] - this.insets[2]);
+      const edge = width * .035;
+      const boundX = (point) => {
+        // Limit only the visual travel at the outer lanes and retain the signed sweep.
+        const view = this.viewPoint(point);
+        const min = this.cameraX + (this.insets[0] + edge - this.centerX) * view[2] / this.focal;
+        const max = this.cameraX + (this.width - this.insets[2] - edge - this.centerX) * view[2] / this.focal;
+        return [clamp(point[0], min, max), point[1], point[2]];
+      };
+      for (let part = 0; part < deathPlates.length; part++) {
+        const piecesForPlate = sliced ? slicedPlates[part] : [deathPlates[part]];
+        for (let band = 0; band < piecesForPlate.length; band++) {
+          const section = piecesForPlate[band];
+          if (section.length < 3) continue;
+          const side = part === 0 ? 0 : part % 2 ? -1 : 1;
+          const random = repeatable(1901 + part);
+          let shift = [side * split * (.23 + random * .40), split * (random - .45) * .6, split * (random - .5) * .85];
+          if (sliced) {
+            const slide = (band % 2 ? -1 : 1) * (.20 + band * .27) * (.10 + spread);
+            shift = [slide, (band - 2) * (.024 + spread * .115), -(.16 + band * .32) * spread];
+          } else if (type === 'spikes') {
+            shift[1] += split * (part >= 5 ? 1.18 : random * .9);
+          } else if (type === 'movingBarrier') {
+            shift[0] += direction * split * (.25 + random * .68);
+          } else if (type === 'gap') {
+            shift = shift.map((value) => value * .27);
+          }
+          const at = (point, front) => boundX(transform([point[0], point[1], front], shift));
+          const front = section.map((point) => at(point, -thickness));
+          const back = section.map((point) => at(point, thickness));
+          const visor = part === 0 && (!sliced || band === 3) ?
+            [at([-.24, 1.60], -thickness - .006), at([.24, 1.60], -thickness - .006)] : null;
+          const viewDepth = front.reduce((total, point) => total + this.viewPoint(point)[2], 0) / front.length;
+          pieces.push({ near: backFacing ? back : front, far: backFacing ? front : back, viewDepth, visor });
+        }
+      }
+      ctx.globalAlpha = fade;
+      const [light, rim, face, dark] = palette;
+      pieces.sort((a, b) => b.viewDepth - a.viewDepth);
+      if (type === 'gap' && time >= .46) this.clipDeathGap(hazard, run.distance);
+      for (const { near, far, visor } of pieces) {
+        this.face(far, dark);
+        for (let index = 0; index < near.length; index++) {
+          const next = (index + 1) % near.length;
+          this.face([far[index], far[next], near[next], near[index]], dark);
+        }
+        this.face(near, face);
+        this.line([...near, near[0]], rim, sliced ? 1.3 : 1.65);
+        if (visor) this.line(visor, light, 2.8);
+      }
+      if (!still) this.deathDebris(type, [impact.x, impact.y, z], time, bodyDepth, fade, direction, palette);
+      ctx.restore();
+    }
+
+    clipDeathGap(hazard, distance) {
+      const left = laneX(hazard.lane) - LANE_WIDTH / 2;
+      const right = left + LANE_WIDTH * (hazard.lanes ?? 1);
+      const near = hazard.z - distance;
+      const far = hazard.end - distance;
+      const hull = [[left, 0, near], [left, 0, far], [right, 0, far], [right, 0, near]];
+      const visible = clip(hull.map((point) => this.viewPoint(point)));
+      this.ctx.beginPath();
+      for (const point of visible) this.ctx.lineTo(...this.screenPoint(point));
+      this.ctx.closePath();
+      this.ctx.clip();
+    }
+
+    deathContact(run, hazard, z, time, fade, direction, [light, rim, face]) {
+      const { ctx } = this;
+      const { type, impact: { x, y, z: impactDepth }, lane } = hazard;
+      const scale = this.longitudinalScale;
+      const spread = easeOut(time / .50);
+      const at = (dx, dy, depth = 0) => [x + dx, y + dy, z + depth / scale];
+      ctx.globalAlpha = .78 * fade;
+      if (type === 'barrier' || type === 'movingBarrier' || type === 'platform') {
+        const platform = type === 'platform';
+        const { height, halfWidth, halfDepth } = platform ?
+          { height: hazard.height ?? PLATFORM_HEIGHT, halfWidth: PLATFORM_HALF_WIDTH, halfDepth: 0 } : obstacles.barrier;
+        const center = type === 'movingBarrier' ? movingBarrierX(hazard, hazard.impactTime ?? run.time) : laneX(lane);
+        const front = hazard.z - run.distance - halfDepth;
+        const end = (hazard.end ?? hazard.z + halfDepth) - run.distance;
+        const side = z > front + .025 && Math.abs(x - center) > halfWidth ? Math.sign(x - center) : 0;
+        const heightAt = clamp(y + (platform ? .55 : 1.04), .18, height - .18);
+        const panel = (dx, dy) => [side ? center + side * (halfWidth + .004) :
+          clamp(x + dx, center - halfWidth + .03, center + halfWidth - .03),
+        clamp(heightAt + dy, .045, height - .035), side ? clamp(z + dx / scale, front, end) : front - .005];
+        const imprint = [panel(-.52, .31), panel(-.23, .57), panel(.26, .55), panel(.53, .26),
+          panel(.43, -.37), panel(.07, -.58), panel(-.43, -.39)];
+        ctx.globalAlpha *= 1 - spread * .57;
+        if (!platform) this.face(imprint, face + 'aa');
+        this.line([...imprint, imprint[0]], rim, platform ? 1.6 : 2);
+        const origin = panel(0, .12);
+        this.line([panel(-.83, .51), panel(-.34, .18), origin, panel(-.17, -.23), panel(.12, -.65)], light, 1.8);
+        this.line([panel(.79, .44), panel(.33, .28), origin, panel(.37, -.12), panel(.75, -.15)], rim, 1.5);
+        if (platform) {
+          ctx.globalAlpha = fade * .86;
+          for (let chip = 0; chip < 8; chip++) {
+            const drop = easeOut(Math.max(0, (this.reduceMotion ? .29 : time) - chip * .024) / .66);
+            const offset = (repeatable(chip + 1690) - .5) * 1.31;
+            const top = .40 - drop * .92 + repeatable(chip + 1772) * .27;
+            this.face([panel(offset - .055, top), panel(offset + .077, top - .075),
+              panel(offset + .032, top - .26)], chip % 3 === 0 ? light : rim);
+          }
+        }
+        if (direction) {
+          const sweep = direction * (.67 + spread * .92);
+          this.line([at(-sweep * .36, .31, -.14), at(sweep, .41, -.35)], rim, 2.4);
+        }
+      } else if (type === 'slideGate') {
+        const front = hazard.z - run.distance - .005;
+        const middle = laneX(lane);
+        const atBeam = (dx, dy) => [clamp(x + dx, middle - SLIDE_GATE_HALF_WIDTH, middle + SLIDE_GATE_HALF_WIDTH),
+          clamp(y + 1.58, SLIDE_GATE_CLEARANCE, SLIDE_GATE_HEIGHT - .27) + dy, front];
+        for (const offset of [0, .12]) {
+          this.line([atBeam(-1.36, offset), atBeam(1.36, offset)], offset ? light : rim, offset ? 1.3 : 2.8);
+        }
+      } else if (type === 'spikes' || type === 'hurdle') {
+        const spikes = type === 'spikes';
+        const base = spikes ? clamp(y, .055, SPIKE_HEIGHT) : obstacles.hurdle.height;
+        const front = spikes ? Math.max(0, hazard.z - impactDepth) :
+          hazard.z - obstacles.hurdle.halfDepth - impactDepth - .005;
+        const mark = (dx, height, depth = 0) => [x + dx, base + height, z + front + depth / scale];
+        for (const side of [-1, 1]) {
+          this.line([mark(side * .26, .03), mark(side * (.57 + .19 * spread), spikes ? .32 : .16, -.15),
+            mark(side * (.46 + spread * .27), spikes ? .86 + .35 * spread : .06, -.08)],
+          side > 0 ? light : rim, 1.9);
+        }
+      } else if (type === 'gap') {
+        const left = laneX(lane) - LANE_WIDTH / 2;
+        const right = left + LANE_WIDTH * (hazard.lanes ?? 1);
+        const center = clamp(x, left + .56, right - .56);
+        const depth = clamp(z + (.83 + spread * 2.5) / scale, hazard.z - run.distance, hazard.end - run.distance);
+        ctx.save();
+        this.clipDeathGap(hazard, run.distance);
+        for (const offset of [0, .28, .57]) {
+          const width = .54 - offset * .48;
+          this.line([[center - width, -.16 - offset, depth], [center, -.42 - offset, depth],
+            [center + width, -.16 - offset, depth]], rim, 1.55);
+        }
+        ctx.restore();
+      }
+      ctx.globalAlpha = 1;
+    }
+
+    deathDebris(type, [x, y, z], time, depth, fade, direction, [light, rim, face]) {
+      const scatter = easeOut((time - .05) / .91);
+      if (scatter <= 0) return;
+      this.ctx.globalAlpha = fade * Math.min(1, scatter * 5);
+      const scale = this.longitudinalScale;
+      const count = type === 'gap' ? 7 : type === 'slideGate' ? 12 : 19;
+      for (let index = 0; index < count; index++) {
+        const speed = repeatable(index * 4 + 1521);
+        const angle = repeatable(index * 4 + 1522) * Math.PI * 2;
+        const length = repeatable(index * 4 + 1523);
+        const throwX = Math.cos(angle);
+        let dx = throwX * (.34 + scatter * (1 + speed * 1.15));
+        let dy = .86 + Math.sin(angle) * (.32 + .71 * scatter) - scatter ** 2 * .39;
+        let dz = depth + (length - .5) * scatter * 2.2;
+        let width = .035 + speed * .11;
+        let height = width * (1.5 + length);
+        switch (type) {
+          case 'hurdle':
+            dy = .31 + speed * scatter * 1.21;
+            dz = .38 + scatter * (1.55 + length * 2.45);
+            break;
+          case 'movingBarrier':
+            dx = throwX * .42 + direction * scatter * (.4 + speed * 2.63);
+            dy += speed * .45;
+            width *= 1.8;
+            break;
+          case 'slideGate':
+            dx = throwX * (.37 + scatter * (1.25 + speed * 1.1));
+            dy = .25 + index % 5 * .39;
+            width *= 3.25;
+            height = .022;
+            break;
+          case 'spikes':
+            dx *= .66;
+            dy = .37 + scatter * (.55 + speed * 3.0);
+            height *= 2;
+            break;
+          case 'gap':
+            dx *= .35;
+            dy = .82 - scatter * (1.3 + speed * .88);
+            width *= 1 - scatter * .7;
+            break;
+          case 'platform':
+            dx *= .65;
+            dy = .43 + speed * scatter * 1.15 - scatter ** 2 * .48;
+            dz -= scatter * .60;
+            break;
+        }
+        const centerX = clamp(x + dx, -ROAD_HALF - .08, ROAD_HALF + .08);
+        const bottom = type === 'gap' ? y + dy : Math.max(.04, y + dy);
+        const point = (offset, rise, reach) => [centerX + offset, bottom + rise, z + (dz + reach) / scale];
+        this.face([point(-width, 0, .05), point(width * .68, height * .25, 0), point(width * .23, height, -.07)],
+          index % 4 === 0 ? light : index % 4 === 1 ? face : rim);
+      }
     }
 
     drawParticles(dt, distance) {
@@ -753,58 +1445,55 @@
     }
 
     drawBoost(intensity) {
-      const { ctx, width, height, centerX, horizon } = this;
-      const tint = '112, 255, 212';
-      const core = '226, 255, 247';
-      const originY = horizon + height * 0.07;
-      const edge = ctx.createRadialGradient(centerX, originY, Math.min(width, height) * 0.31,
-        centerX, originY, Math.hypot(width * 0.54, height * 0.65));
-      edge.addColorStop(0, `rgba(${tint}, 0)`);
-      edge.addColorStop(1, `rgba(${tint}, ${intensity * 0.17 + this.speedPulse * 0.2})`);
-      ctx.fillStyle = edge;
-      ctx.fillRect(0, 0, width, height);
-
-      for (const line of this.speedLines) {
-        const phase = (line.offset + this.speedTravel * line.pace) % 1;
-        const start = 0.35 + phase * 0.86;
-        const end = start + (0.046 + intensity * 0.23) * line.size;
-        const dx = line.x * width * 0.67;
-        const dy = line.y * height * 0.94;
-        const opacity = intensity * Math.min(phase * 7, (1 - phase) * 6, 1) * line.size;
-        ctx.beginPath();
-        ctx.moveTo(centerX + dx * start, originY + dy * start);
-        ctx.lineTo(centerX + dx * end, originY + dy * end);
-        ctx.lineWidth = 1.5 + intensity * line.size * 4;
-        ctx.strokeStyle = `rgba(${tint}, ${opacity * 0.26})`;
-        ctx.stroke();
-
-        const coreStart = end - (end - start) * 0.66;
-        ctx.beginPath();
-        ctx.moveTo(centerX + dx * coreStart, originY + dy * coreStart);
-        ctx.lineTo(centerX + dx * end, originY + dy * end);
-        ctx.lineWidth = 0.7 + intensity * line.size * 1.5;
-        ctx.strokeStyle = `rgba(${core}, ${opacity * 0.92})`;
-        ctx.stroke();
+      const { ctx, width, height, horizon } = this;
+      const [left, , right] = this.insets;
+      const gutter = (width - left - right) * 0.14;
+      if (gutter <= 0) return;
+      for (const side of [-1, 1]) {
+        const edge = side < 0 ? left : width - right;
+        const inward = -side;
+        const glow = ctx.createLinearGradient(edge, 0, edge + inward * gutter, 0);
+        glow.addColorStop(0, `rgba(52, 244, 180, ${intensity * .26 + this.speedPulse * .10})`);
+        glow.addColorStop(1, '#34f4b400');
+        ctx.fillStyle = glow;
+        ctx.fillRect(side < 0 ? edge : edge - gutter, 0, gutter, height);
+        for (let index = 0; index < 7; index++) {
+          const line = this.speedLines[index * 2 + (side < 0 ? 0 : 1)];
+          const phase = (line.offset + this.speedTravel * line.pace) % 1;
+          const start = 1 - phase * .68;
+          const end = Math.max(.018, start - (.25 + intensity * .28) * line.size);
+          const y = horizon + height * (.28 + phase * .46 + line.y * .12);
+          const slope = height * (.095 + intensity * .13);
+          const opacity = intensity * Math.min(phase * 7, (1 - phase) * 6, 1) * line.size;
+          ctx.beginPath();
+          ctx.moveTo(edge + inward * gutter * start, y);
+          ctx.lineTo(edge + inward * gutter * end, y + (start - end) * slope);
+          ctx.lineWidth = 1.15 + intensity * line.size * 1.5;
+          ctx.strokeStyle = `rgba(160, 255, 218, ${opacity * .9})`;
+          ctx.stroke();
+        }
       }
     }
 
     drawDash() {
       const { ctx, width, height } = this;
       // Keep the dash effect inside the outer gutters so obstacles stay readable.
-      const gutter = width * 0.14;
+      const [left, , right] = this.insets;
+      const gutter = (width - left - right) * 0.14;
+      if (gutter <= 0) return;
       for (const side of [-1, 1]) {
-        const edge = side < 0 ? 0 : width;
+        const edge = side < 0 ? left : width - right;
         const inward = -side;
         const glow = ctx.createLinearGradient(edge, 0, edge + inward * gutter, 0);
         glow.addColorStop(0, '#4c9fff63');
         glow.addColorStop(1, '#4c9fff00');
         ctx.fillStyle = glow;
-        ctx.fillRect(side < 0 ? 0 : width - gutter, 0, gutter, height);
+        ctx.fillRect(side < 0 ? edge : edge - gutter, 0, gutter, height);
 
         for (let index = 0; index < 5; index++) {
           const phase = (this.speedTravel * 0.8 + (index + 0.18) / 5) % 1;
           const near = edge + inward * gutter * (0.95 - phase * 0.36);
-          const far = near - inward * gutter * (0.23 + phase * 0.40);
+          const far = edge + inward * gutter * Math.max(.018, .72 - phase * .76);
           const y = height * (0.20 + phase * 0.66);
           const endY = y + height * (0.026 + phase * 0.048);
           const opacity = Math.min(phase * 7, (1 - phase) * 7, 1);
@@ -850,38 +1539,105 @@
       this.horizon = this.centerY - this.focal * SIN / COS;
     }
 
-    draw(run, time, dt, mode) {
+    drawCourseObjects(run, time, ready, dashing, boosting, death = null) {
+      const limit = this.viewDistance * OBSTACLE_VIEW_FRACTION;
+      const rear = -this.rearViewDistance;
+      let playerDepth = 0;
+      if (!run.airborne && run.height > 0 && (dashing || boosting)) {
+        // Paint the supporting deck beneath the whole wake before drawing the runner.
+        const wake = this.reduceMotion ? SHORT_WAKE : dashing ? DASH_WAKE : SLIDE_WAKE;
+        playerDepth = -wake / this.longitudinalScale;
+      }
+      const atDepth = new Map();
+      const spans = [];
+      const addPoint = (z, item) => {
+        if (z < rear || z >= limit) return;
+        if (!atDepth.has(z)) atDepth.set(z, []);
+        atDepth.get(z).push(item);
+      };
+      if (!run.crash && !death) addPoint(playerDepth, { type: 'player' });
+      if (this.slideBurst) {
+        const z = this.slideBurst.z - run.distance;
+        const orderDepth = this.slideBurst.y > 0 ? Math.max(rear, z - 1.8 / this.longitudinalScale) : z;
+        if (z >= rear) addPoint(orderDepth, { type: 'slideBurst', z });
+      }
+      for (const obstacle of run.obstacles) {
+        const z = obstacle.z - run.distance;
+        switch (obstacle.type) {
+          case 'gap':
+            break;
+          case 'spikes':
+            this.spikes(obstacle, run.distance);
+            break;
+          case 'platform':
+          case 'slideGate': {
+            const near = Math.max(rear, z);
+            const far = Math.min(limit, obstacle.end - run.distance);
+            if (near >= far) break;
+            spans.push({ obstacle, near, far });
+            if (!atDepth.has(near)) atDepth.set(near, []);
+            if (!atDepth.has(far)) atDepth.set(far, []);
+            break;
+          }
+          default:
+            addPoint(z, obstacle);
+        }
+      }
+      for (const bolt of run.bolts ?? []) addPoint(bolt.z - run.distance, { type: 'bolt', bolt });
+
+      const depths = [...atDepth.keys()].sort((a, b) => b - a);
+      const ambient = (z) => Math.min(1, (185 - this.projectedDepth(z)) / 112);
+      for (let index = 0; index < depths.length; index++) {
+        const z = depths[index];
+        for (const item of atDepth.get(z)) {
+          this.ctx.globalAlpha = item.type === 'player' ? 1 : ambient(z);
+          if (item.type === 'player') {
+            this.player(run, time, ready, dashing, boosting);
+          } else if (item.type === 'slideBurst') {
+            this.drawSlideBurst(item.z, run.time);
+          } else if (item.type === 'bolt') {
+            this.bolt(item.bolt, z);
+          } else if (item.type === 'movingBarrier') {
+            const impactTime = death && item.id === death.impact.id ? death.impact.impactTime : undefined;
+            this.movingBarrier(item, z, impactTime ?? run.time);
+          } else if (item.type === 'blackHole') {
+            this.blackHole(item, z, this.reduceMotion ? 0 : time);
+          } else if (Object.hasOwn(obstacles, item.type)) {
+            const x = laneX(item.lane);
+            const halfWidth = obstacles[item.type].halfWidth;
+            if (halfWidth) this.flat(x - halfWidth - 0.11, x + halfWidth + 0.11, z - 0.63, z + 0.54, '#130b20b5', .028);
+            this[item.type](x, z);
+          }
+        }
+        // Each span draws the part behind this depth before painting the part in front of it.
+        const near = depths[index + 1];
+        if (near === undefined) break;
+        for (const span of spans) {
+          if (near < span.near || z > span.far) continue;
+          this.ctx.globalAlpha = ambient(span.near);
+          this[span.obstacle.type](span.obstacle, run.distance, near, z);
+        }
+      }
+      this.ctx.globalAlpha = 1;
+      if (death) this.deathPlayer(run, death);
+    }
+
+    draw(run, time, dt, mode, latestClue = 0, signal = null, death = null) {
       const ready = mode === 'ready';
       const dashing = mode === 'running' && run.dashing;
+      const boosting = mode === 'running' && run.boosting;
+      if (this.slideBurst && (mode !== 'running' || run.time - this.slideBurst.time >= SLIDE_BURST_TIME)) {
+        this.slideBurst = null;
+      }
       this.updateSpeed(run, dt, mode);
       if (ready || this.reduceMotion) this.openingBlend = ready ? 1 : 0;
       else this.openingBlend *= Math.exp(-dt * 8);
       this.frameCamera(run);
 
-      this.sky(this.reduceMotion ? 0 : time);
+      this.sky(this.reduceMotion ? 0 : time, latestClue, signal);
       this.deepVoid(run.distance);
       this.track(run, ready);
-      for (const obstacle of run.obstacles) {
-        if (obstacle.type === 'spikes') this.spikes(obstacle, run.distance);
-      }
-      const obstacleView = this.viewDistance * OBSTACLE_VIEW_FRACTION;
-      const visible = run.obstacles.filter((obstacle) => obstacles[obstacle.type] &&
-        obstacle.z - run.distance >= -this.rearViewDistance && obstacle.z - run.distance < obstacleView);
-      let playerDrawn = false;
-      for (const obstacle of visible.reverse()) {
-        const z = obstacle.z - run.distance;
-        if (z < 0 && !playerDrawn) {
-          this.player(run, time, ready, dashing);
-          playerDrawn = true;
-        }
-        this.ctx.globalAlpha = Math.min(1, (185 - this.projectedDepth(z)) / 112);
-        const x = laneX(obstacle.lane);
-        const halfWidth = obstacles[obstacle.type].halfWidth;
-        if (halfWidth) this.flat(x - halfWidth - 0.11, x + halfWidth + 0.11, z - 0.63, z + 0.54, '#130b20b5', .028);
-        this[obstacle.type](x, z);
-        this.ctx.globalAlpha = 1;
-      }
-      if (!playerDrawn) this.player(run, time, ready, dashing);
+      this.drawCourseObjects(run, time, ready, dashing, boosting, mode === 'dying' ? death : null);
       this.drawParticles(dt, run.distance);
       if (mode === 'running' && !this.reduceMotion) {
         if (dashing) this.drawDash();

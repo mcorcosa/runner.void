@@ -12,17 +12,22 @@
   <link rel="apple-touch-icon" sizes="180x180" href="icons/apple-touch-icon.png">
   <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
   <link rel="stylesheet" href="style.css">
+  <script src="encounters.js" defer></script>
+  <script src="bolts.js" defer></script>
   <script src="game.js" defer></script>
+  <script src="episode.js" defer></script>
   <script src="scene.js" defer></script>
+  <script src="audio.js" defer></script>
   <script src="app.js" defer></script>
 </head>
-<body data-mode="ready">
+<body data-mode="ready" data-signal="0">
   <main class="game" id="game" aria-label="run.void">
     <canvas id="scene" aria-hidden="true"></canvas>
     <div class="vignette" aria-hidden="true"></div>
+    <div class="signal-noise" aria-hidden="true"></div>
     <div id="swipe-field" class="swipe-field" aria-hidden="true" hidden></div>
 
-    <header class="hud">
+    <header id="hud" class="hud">
       <div class="brand">
         <svg viewBox="0 0 36 36" width="34" height="34" aria-hidden="true">
           <path d="M18 2 32 10v16l-14 8-14-8V10Z" fill="#211639" stroke="#b48cff" stroke-width="1.3"/>
@@ -30,23 +35,32 @@
         </svg>
         <span>run<span class="brand-accent">.</span>void</span>
       </div>
-      <div class="telemetry" aria-label="Run statistics">
-        <div class="metric"><span class="label">Distance</span><span class="reading"><span id="distance">0000</span> <small>m</small></span></div>
-        <div class="metric"><span class="label">Speed</span><span class="reading"><span id="speed">32</span> <small>m/s</small></span></div>
+      <div class="hud-right">
+        <div class="telemetry" aria-label="Run statistics">
+          <div class="metric"><span class="label">Distance</span><span class="reading"><span id="distance">0000</span> <small>m</small></span></div>
+          <div class="metric speed-metric"><span class="label">Speed</span><span class="reading"><span id="speed">48</span> <small>m/s</small></span></div>
+          <div class="metric bolt-metric"><span class="label">Bolts</span><span class="reading" id="bolts">0</span></div>
+        </div>
+        <button id="mute" class="mute" type="button" aria-label="Mute audio" aria-pressed="false">Mute</button>
       </div>
-      <div class="dash-status" id="dash-status" role="status"></div>
+      <div class="signal-status" id="signal-status" role="status"></div>
     </header>
+
+    <div id="death-shade" class="death-shade" aria-hidden="true" hidden></div>
+    <p id="death-thought" class="death-thought" role="status" aria-atomic="true"></p>
 
     <section class="intro" aria-labelledby="game-title">
       <div class="title-rule" aria-hidden="true"></div>
       <h1 id="game-title" aria-label="run.void">run.<br aria-hidden="true"><span>void</span></h1>
-      <p>Jump hurdles and short spike patches. Dash midair over long spikes. Change lanes before yellow roadblocks.</p>
-      <p class="touch-instructions">Swipe sideways to move, up to jump, and down to slide. Slide at touchdown for a speed boost. Tap Dash with either finger.</p>
+      <p>Jump hurdles and short gaps. Dash through cracked barriers or midair over long spikes. Bolts cut the 4s recharge by 1s each.</p>
+      <p class="touch-instructions">Swipe sideways to move, up to jump, and down to slide. Slide at touchdown for a boost. Tap Dash with either finger.</p>
       <div class="actions">
         <button id="start" type="button">Start run</button>
         <button id="install" class="install-trigger" type="button" aria-haspopup="dialog" hidden>Install</button>
         <span class="shortcut">or press <kbd>Enter</kbd></span>
+        <button id="reset-clues" class="clue-reset" type="button" hidden>Reset clue progress</button>
       </div>
+      <p id="clue-reset-status" class="clue-reset-status" role="status"></p>
     </section>
 
     <dialog id="install-guide" class="install-guide" aria-labelledby="install-title" aria-modal="true">
@@ -116,11 +130,22 @@
         <h2 id="result-title">Run ended</h2>
         <p id="impact"></p>
         <div class="result-distance"><strong id="final-distance">0</strong> <span>m</span></div>
-        <button id="restart" type="button">Run again</button>
+        <div class="result-bolts">Bolts <strong id="final-bolts">0</strong> this run<span id="bolt-bank"> · <strong id="banked-bolts">0</strong> banked</span><span id="bolt-save-status" role="status"></span></div>
+        <div class="result-actions">
+          <button id="restart" type="button">Run again</button>
+        </div>
+        <div id="recordings" class="recordings" role="group" aria-label="Discovered recordings" hidden>
+          <button id="replay-1" class="replay" type="button" hidden>Replay clue 1</button>
+          <button id="replay-2" class="replay" type="button" hidden>Replay clue 2</button>
+          <button id="replay-3" class="replay" type="button" hidden>Replay clue 3</button>
+          <button id="replay-4" class="replay" type="button" hidden>Replay clue 4</button>
+        </div>
         <div class="shortcut">or press <kbd>Enter</kbd></div>
+        <button id="reset-results-clues" class="clue-reset" type="button" hidden>Reset clue progress</button>
       </div>
     </section>
 
+    <p id="sky-signal" class="sky-signal" role="status"></p>
     <div class="feedback" id="feedback" role="status"></div>
 
     <div class="touch-dock" id="touch-controls" role="group" aria-label="Touch controls" hidden>
@@ -132,11 +157,11 @@
     </div>
 
     <footer class="controls" aria-label="Keyboard controls">
-      <div class="control"><div class="keys"><kbd aria-label="Left Arrow">←</kbd><kbd aria-label="Right Arrow">→</kbd><span class="divider" aria-hidden="true">/</span><kbd>A</kbd><kbd>D</kbd></div><span>Change lane</span></div>
+      <div class="control"><div class="keys"><kbd aria-label="Left Arrow">←</kbd><kbd aria-label="Right Arrow">→</kbd><span class="divider" aria-hidden="true">/</span><kbd>A</kbd><kbd>D</kbd></div><span>Move</span></div>
       <div class="control"><div class="keys"><kbd>Space</kbd></div><span>Jump</span></div>
-      <div class="control"><div class="keys"><kbd aria-label="Down Arrow">↓</kbd><kbd>S</kbd></div><span>Slide <span class="divider">/</span> Power slide at touchdown</span></div>
-      <div class="control"><div class="keys"><kbd>W</kbd><kbd>X</kbd></div><span>Dash <span class="divider">/</span> Break cracked barriers</span></div>
-      <div class="dash-meter" aria-hidden="true"><span id="dash-label">Dash ready</span><div class="charge"><i id="charge"></i></div></div>
+      <div class="control"><div class="keys"><kbd aria-label="Down Arrow">↓</kbd><kbd>S</kbd></div><span>Slide</span></div>
+      <div class="control"><div class="keys"><kbd>W</kbd><kbd>X</kbd></div><span>Dash</span></div>
+      <div class="dash-meter"><span id="dash-label" role="status">Dash ready</span><div class="charge" aria-hidden="true"><i id="charge"></i></div></div>
     </footer>
   </main>
 </body>
